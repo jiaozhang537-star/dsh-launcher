@@ -1,0 +1,56 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# 本机沙盒/构建产物
+.npm-cache
+src-tauri/target
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# R-1 recon: official DSH copy (never commit)
+.recon
+
+# 走查截图（大体积二进制，不入库）
+browser-screenshots
+
+# 视觉比对工具产物
+.dsh-vision-toolkit
+
+# ZCode 会话计划
+.zcode
+
+# 原始素材（大体积源文件，public/ 已有处理后的副本）
+素材
+
+# 临时测试输出
+cargo-test-out.txt
+e2e-journey-out.txt
+_src.svg
+# 版本图标源文件是项目资产，不受上面的临时 SVG 规则误伤
+!public/version-icon/_src.svg
+
+# 根 .gitignore 的 lib/（包构建产物）会误伤启动器核心代码目录，反选入库
+!src/lib/
+
+# npm 沙盒实验目录
+.tmp/

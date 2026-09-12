@@ -1,0 +1,38 @@
+/* PCL 风格主题变量 —— 色值取自 PCL2 开源仓库 Application.xaml 的官方色板 */
+:root {
+  /* 主色阶（ColorBrush2~8） */
+  --color-primary-deep: #0b5bcb;
+  --color-primary: #1370f3;
+  --color-primary-bright: #4890f5;
+  --color-primary-light: #96c0f9;
+  --color-primary-pale: #d5e6fd;
+  --color-bg-page: #eaf2fe;        /* ColorBrush8：内容区底 */
+  --color-bg-page-alt: #e0eafd;    /* ColorBrush7 */
+
+  /* 文本（Gray1~3） */
+  --color-text: #404040;
+  --color-text-secondary: #737373;
+  --color-text-tertiary: #8c8c8c;
+
+  /* 状态 */
+  --color-danger-hover: #ff4c4c;
+  --color-danger-dark: #ce2111;
+
+  /* 圆角（窗体 6px 来自 FormMain RectForm RadiusX/Y=6） */
+  --radius-window: 6px;
+  --radius-md: 8px;
+  --radius-card: 13px;
+
+  /* 字阶 */
+  --font-size-xs: 11px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+
+  --font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+
+  /* 布局（48px 蓝栏来自 FormMain.xaml；10px 透明边带承载 PCL 级微弱投影） */
+  --topbar-height: 48px;
+  --window-frame: 10px;
+}

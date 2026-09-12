@@ -1,0 +1,43 @@
+[package]
+name = "dsh-launcher"
+version = "0.1.0"
+description = "DeepSeek Harness 图形化启动器"
+authors = ["MLTZ"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "dsh_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+# 整合包导出的保存对话框（P4；一方插件）。MIT/Apache-2.0。
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde_yaml = "0.9"
+# 下载产物哈希校验与市场快照完整性（P2-03 / P3-05）。MIT/Apache-2.0。
+sha2 = "0.10"
+# 整合包 tgz 容器（P4，T-3 定稿：manifest + 插件 npm 源码 tarball）。MIT/Apache-2.0。
+tar = "0.4"
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+# DPAPI（CryptProtectData/CryptUnprotectData）用于 API Key 加密落盘（FR-06）；
+# Threading 用于按 pid 查询进程存活与镜像名（孤儿实例进程识别）。
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+] }

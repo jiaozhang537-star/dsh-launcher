@@ -1,0 +1,33 @@
+{
+  "attribution": "内置提供方目录分两组：curated = 数据参照 models.dev（MIT）与各提供方官方文档交叉核对定稿（T-7 侦察裁决：models.dev 字段不统一且缺 GLM/Kimi/Qwen/Ollama，故落仓库内静态快照，不引入运行时依赖）；dsh = 取自 DSH 本体 llm 层实装的 @earendil-works/pi-ai（MIT）0.82.1 内置 provider 目录（id/label/baseUrl/接口形态/env 名均与 dist/providers/*.js 一一核对），这些提供方 DSH 可原生路由消费。图标 slug 参照 simple-icons（CC0），缺 slug 用字母块兜底。",
+  "providers": [
+    { "id": "deepseek", "label": "DeepSeek", "base": "https://api.deepseek.com", "style": "openai", "icon": "deepseek", "group": "curated" },
+    { "id": "glm", "label": "GLM（智谱）", "base": "https://open.bigmodel.cn/api/paas/v4", "style": "openai", "icon": null, "group": "curated" },
+    { "id": "kimi", "label": "Kimi（月之暗面）", "base": "https://api.moonshot.cn/v1", "style": "openai", "icon": "moonshotai", "group": "curated" },
+    { "id": "qwen", "label": "Qwen（通义）", "base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "style": "openai", "icon": null, "group": "curated" },
+    { "id": "openai", "label": "OpenAI", "base": "https://api.openai.com/v1", "style": "openai", "icon": "openai", "group": "curated" },
+    { "id": "anthropic", "label": "Anthropic", "base": "https://api.anthropic.com/v1", "style": "anthropic", "icon": "anthropic", "group": "curated" },
+    { "id": "xai", "label": "xAI", "base": "https://api.x.ai/v1", "style": "openai", "icon": "xai", "group": "curated" },
+    { "id": "gemini", "label": "Gemini", "base": "https://generativelanguage.googleapis.com/v1beta", "style": "gemini", "icon": "google", "group": "curated" },
+    { "id": "siliconflow", "label": "硅基流动", "base": "https://api.siliconflow.cn/v1", "style": "openai", "icon": null, "group": "curated" },
+    { "id": "openrouter", "label": "OpenRouter", "base": "https://openrouter.ai/api/v1", "style": "openai", "icon": "openrouter", "group": "curated" },
+    { "id": "ollama", "label": "Ollama", "base": "http://127.0.0.1:11434", "style": "ollama", "icon": "ollama", "group": "curated" },
+    { "id": "groq", "label": "Groq", "base": "https://api.groq.com/openai/v1", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "cerebras", "label": "Cerebras", "base": "https://api.cerebras.ai/v1", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "together", "label": "Together", "base": "https://api.together.ai/v1", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "nvidia", "label": "NVIDIA", "base": "https://integrate.api.nvidia.com/v1", "style": "openai", "icon": "nvidia", "group": "dsh" },
+    { "id": "huggingface", "label": "Hugging Face", "base": "https://router.huggingface.co/v1", "style": "openai", "icon": "huggingface", "group": "dsh" },
+    { "id": "ant-ling", "label": "Ant Ling", "base": "https://api.ant-ling.com/v1", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "zai", "label": "Z.AI", "base": "https://api.z.ai/api/coding/paas/v4", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "zai-coding-cn", "label": "Z.AI Coding CN（智谱编码）", "base": "https://open.bigmodel.cn/api/coding/paas/v4", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "moonshotai", "label": "Moonshot AI（国际）", "base": "https://api.moonshot.ai/v1", "style": "openai", "icon": "moonshotai", "group": "dsh" },
+    { "id": "xiaomi", "label": "小米 MiMo", "base": "https://api.xiaomimimo.com/v1", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "qwen-token-plan", "label": "Qwen Token Plan", "base": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "qwen-token-plan-cn", "label": "Qwen Token Plan CN", "base": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", "style": "openai", "icon": null, "group": "dsh" },
+    { "id": "minimax", "label": "MiniMax", "base": "https://api.minimax.io/anthropic", "style": "anthropic", "icon": null, "group": "dsh" },
+    { "id": "minimax-cn", "label": "MiniMax CN", "base": "https://api.minimaxi.com/anthropic", "style": "anthropic", "icon": null, "group": "dsh" },
+    { "id": "kimi-coding", "label": "Kimi For Coding", "base": "https://api.kimi.com/coding", "style": "anthropic", "icon": null, "group": "dsh" },
+    { "id": "fireworks", "label": "Fireworks", "base": "https://api.fireworks.ai/inference", "style": "anthropic", "icon": null, "group": "dsh" },
+    { "id": "vercel-ai-gateway", "label": "Vercel AI Gateway", "base": "https://ai-gateway.vercel.sh", "style": "anthropic", "icon": "vercel", "group": "dsh" }
+  ]
+}
