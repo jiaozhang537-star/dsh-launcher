@@ -46,7 +46,7 @@ export function renderModpackSection(container: HTMLElement): HTMLElement {
     sourceSel.append(o);
   }
   const searchBtn = el("button", { type: "button", class: "btn btn--ghost" }, ["搜索"]);
-  const resetBtn = el("button", { type: "button", class: "btn btn--muted" }, ["重置条件"]);
+  const resetBtn = el("button", { type: "button", class: "btn btn--line" }, ["重置条件"]);
 
   const searchCard = el("section", { class: "card settings-card" }, [
     el("h2", { class: "card__title" }, ["搜索 整合包"]),

@@ -21,7 +21,8 @@ export interface VendorEntry {
 /**
  * 启动页厂商目录：默认仅 deepseek（P2 目录）；FR-20 落位后由启动页/设置页用
  * `setVendorCatalog` 注入完整目录（内置 11 类 + 自定义，来自后端
- * providers_view）。图标用 simple-icons CDN（CC0），缺省回退字母方块。
+ * providers_view）。图标用本地 public/vendor-logos/（来源见 素材/LOGOS.md），
+ * 缺省回退字母方块。
  */
 export interface CatalogItem {
   id: string;

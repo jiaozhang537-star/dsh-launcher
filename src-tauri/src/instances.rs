@@ -41,6 +41,11 @@ pub struct Instance {
     pub port: Option<u16>,
     /// 创建时间（RFC3339，本地记录用）。
     pub created_at: String,
+    /// 外部实例目录（原地引用，2026-09-12 需求方定稿）：Some = 经「添加已有文件夹」
+    /// 注册的绝对路径，数据留在原地，删除 = 仅解除关联不删文件夹；None = 托管实例，
+    /// 落 `versions/<id>/`。注册表是唯一事实来源。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 fn default_profile() -> String {
@@ -63,6 +68,7 @@ pub struct InstanceView {
     pub last_launched_at: Option<String>,
     pub port: Option<u16>,
     pub created_at: String,
+    pub dir: Option<String>,
 }
 
 impl From<&Instance> for InstanceView {
@@ -76,6 +82,7 @@ impl From<&Instance> for InstanceView {
             last_launched_at: i.last_launched_at.clone(),
             port: i.port,
             created_at: i.created_at.clone(),
+            dir: i.dir.clone(),
         }
     }
 }
@@ -220,10 +227,17 @@ pub fn save_registry(registry: &InstanceRegistry) -> Result<(), String> {
     Ok(())
 }
 
-/// 实例目录：`<managed root>/instances/<id>`。
+/// 实例目录：托管实例 = `<managed root>/versions/<id>`（FILE-LAYOUT L3）；
+/// 外部实例（原地引用）= 注册表 `dir` 指向的用户文件夹。
 pub fn instance_dir(id: &str) -> Result<PathBuf, String> {
     if !valid_id(id) {
         return Err(format!("非法实例 id：{id:?}"));
+    }
+    // 外部实例：注册表里的 dir 是唯一事实来源（注册表损坏本就 fail loud）。
+    if let Some(instance) = load_registry()?.instances.iter().find(|i| i.id == id) {
+        if let Some(dir) = &instance.dir {
+            return Ok(PathBuf::from(dir));
+        }
     }
     Ok(paths::versions_dir()?.join(id))
 }
@@ -310,6 +324,7 @@ pub fn create_instance(name: &str, profile: &str) -> Result<Instance, String> {
         last_launched_at: None,
         port: Some(port),
         created_at: now_rfc3339(),
+        dir: None,
     };
 
     let dir = instance_dir(&id)?;
@@ -320,6 +335,156 @@ pub fn create_instance(name: &str, profile: &str) -> Result<Instance, String> {
     std::fs::write(&meta_path, meta + "\n").map_err(|e| format!("写入实例元数据失败：{e}"))?;
 
     let mut registry = registry;
+    registry.instances.push(instance.clone());
+    save_registry(&registry)?;
+    Ok(instance)
+}
+
+/// skills 全局共享挂载（2026-09-12 需求变更）：`versions/<id>/skills` 指向
+/// `<托管根>/shared/skills` 的目录联接——所有实例共享一份技能；DSH 照常读
+/// `$DSH_HOME/skills`（联接对它透明），`skill_install` 落实例路径经联接自动
+/// 写进共享区。首次建立；存量真实目录先并入共享区（同名保留共享侧）再替换；
+/// 已是联接则跳过。**仅托管实例调用**——外部实例不共享（2026-09-20 需求方
+/// 裁决方案 A：不动用户文件夹的技能数据、不建联接）。
+pub fn ensure_skills_link(id: &str) -> Result<(), String> {
+    get_instance(id)?;
+    let shared = crate::paths::shared_skills_dir()?;
+    std::fs::create_dir_all(&shared).map_err(|e| format!("创建共享技能目录失败：{e}"))?;
+    let link = instance_dir(id)?.join("skills");
+    if link.is_symlink() {
+        return Ok(());
+    }
+    if link.is_dir() {
+        for entry in std::fs::read_dir(&link)
+            .map_err(|e| format!("读取 {} 失败：{e}", link.display()))?
+            .flatten()
+        {
+            let target = shared.join(entry.file_name());
+            if !target.exists() {
+                std::fs::rename(entry.path(), &target).map_err(|e| {
+                    format!("并入共享技能目录失败（{}）：{e}", entry.path().display())
+                })?;
+            }
+        }
+        std::fs::remove_dir_all(&link)
+            .map_err(|e| format!("移除实例本地技能目录失败：{e}"))?;
+    }
+    #[cfg(windows)]
+    junction::create(&shared, &link).map_err(|e| format!("创建技能目录联接失败：{e}"))?;
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&shared, &link)
+        .map_err(|e| format!("创建技能目录符号链接失败：{e}"))?;
+    Ok(())
+}
+
+/// skills 的「打开」落点：托管实例 = 建联接后开全局共享目录；外部实例 =
+/// 其自身 skills 目录（不共享、不动用户数据——2026-09-20 需求方裁决方案 A）。
+fn skills_display_dir(instance: &Instance) -> Result<PathBuf, String> {
+    if instance.dir.is_some() {
+        return Ok(instance_dir(&instance.id)?.join("skills"));
+    }
+    ensure_skills_link(&instance.id)?;
+    crate::paths::shared_skills_dir()
+}
+
+/// 打开实例子目录（2026-09-12 追加批次）：skills / sessions / sources。
+/// skills 打开**全局共享目录**（托管实例；所有实例同一份，需求变更）；
+/// sessions 缺失时先创建（空目录对 DSH 无副作用）；sources 不预建——缺失时
+/// 报可读错误。
+pub fn open_subdir(app: &tauri::AppHandle, id: &str, which: &str) -> Result<PathBuf, String> {
+    let instance = get_instance(id)?;
+    let dir = match which {
+        "skills" => skills_display_dir(&instance)?,
+        "sessions" | "sources" => instance_dir(id)?.join(which),
+        other => return Err(format!("未知子目录：{other:?}")),
+    };
+    if which == "sources" && !dir.is_dir() {
+        return Err("尚未下载源码——先在「源码归档」卡用「下载源码」补下载。".into());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录 {} 失败：{e}", dir.display()))?;
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(dir.display().to_string(), None::<&str>)
+        .map_err(|e| format!("打开目录失败：{e}"))?;
+    Ok(dir)
+}
+
+/// 「添加已有文件夹」（2026-09-12 需求方定稿：**原地引用**）：把一个既有的
+/// DSH 实例目录注册进启动器。文件夹留在原地，注册表以 `dir` 指向它；删除
+/// 该实例 = 仅解除关联，绝不删用户文件夹。
+///
+/// 校验（满足其一，否则拒绝并说明缺什么）：①含 `instance.json`（启动器实例
+/// 格式）；②含 `app/node_modules/@deepseek-ai/dsh/package.json`（裸 DSH
+/// 安装，读其版本）。同一文件夹不允许重复注册。
+pub fn register_external(folder: &str) -> Result<Instance, String> {
+    let path = PathBuf::from(folder.trim());
+    if !path.is_dir() {
+        return Err(format!("文件夹不存在：{}", path.display()));
+    }
+    let meta_path = path.join("instance.json");
+    let dsh_pkg = path
+        .join("app")
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("package.json");
+    if !meta_path.is_file() && !dsh_pkg.is_file() {
+        return Err(format!(
+            "无法注册：{} 既没有 instance.json（不是启动器实例目录），\
+             也没有 app\\node_modules\\@deepseek-ai\\dsh（未安装 DSH 本体）",
+            path.display()
+        ));
+    }
+    let dsh_version = std::fs::read_to_string(&dsh_pkg)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("version").and_then(|x| x.as_str()).map(String::from));
+
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut registry = load_registry()?;
+    // 同一文件夹不允许重复注册（id 不同但 dir 相同 = 双条目同一份数据）。
+    let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let already = registry.instances.iter().any(|i| {
+        i.dir
+            .as_deref()
+            .map(|d| std::path::Path::new(d).canonicalize().map(|p| p == canon).unwrap_or(false))
+            .unwrap_or(false)
+    });
+    if already {
+        return Err("该文件夹已被注册为实例，不能重复添加。".into());
+    }
+
+    let id = fresh_id(&registry)?;
+    let display = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| id.clone());
+    let name = unique_name(&display, &registry.instances)
+        .ok_or_else(|| "无法生成唯一实例名".to_string())?;
+    let taken: Vec<u16> = registry.instances.iter().filter_map(|i| i.port).collect();
+    let port = allocate_port(PORT_BASE, &taken)
+        .ok_or_else(|| format!("无可用的本地端口（{PORT_BASE} 起全被占用）"))?;
+    let instance = Instance {
+        id: id.clone(),
+        name,
+        profile: "web".to_string(),
+        node_version: None,
+        dsh_version,
+        last_launched_at: None,
+        port: Some(port),
+        created_at: now_rfc3339(),
+        dir: Some(path.display().to_string()),
+    };
+
+    // 外部目录写一份启动器格式的 instance.json（便于携带与二次校验识别）；
+    // 只读目录等写入失败时如实报错。顺序注：先写 meta 再存注册表——注册表
+    // 保存失败时外部 meta 会残留，但无害（重注册可通过其校验；注册表才是
+    // 唯一事实源），不假称原子。
+    let meta = serde_json::to_string_pretty(&instance)
+        .map_err(|e| format!("序列化实例元数据失败：{e}"))?;
+    std::fs::write(meta_path, meta + "\n")
+        .map_err(|e| format!("向该文件夹写入 instance.json 失败（目录只读？）：{e}"))?;
+
     registry.instances.push(instance.clone());
     save_registry(&registry)?;
     Ok(instance)
@@ -375,10 +540,27 @@ fn to_base36(mut v: u64) -> String {
 ///    清除失败不再无人知晓，下次启动自动补刀。
 pub fn delete_instance(id: &str) -> Result<(), String> {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let dir = instance_dir(id)?;
     let mut registry = load_registry()?;
+    // 外部实例（原地引用）：仅解除关联，绝不动用户文件夹。
+    let external_dir = registry
+        .instances
+        .iter()
+        .find(|i| i.id == id)
+        .and_then(|i| i.dir.clone());
     registry.instances.retain(|i| i.id != id);
     save_registry(&registry)?;
+    if external_dir.is_some() {
+        purge_stale_quarantines()?;
+        return Ok(());
+    }
+    let dir = instance_dir(id)?;
+    // skills 全局共享：先把联接本身摘除（只删链接不删目标），物理清除进程
+    // 即便跟进联接也无可删；共享目录内容绝不随实例删除。
+    let skills_link = dir.join("skills");
+    if skills_link.is_symlink() {
+        std::fs::remove_dir(&skills_link)
+            .map_err(|e| format!("移除技能目录联接失败：{e}"))?;
+    }
     if dir.exists() {
         let quarantine = quarantine_dir(id)?;
         std::fs::rename(&dir, &quarantine).map_err(|e| {
@@ -549,6 +731,7 @@ pub(crate) mod tests {
             last_launched_at: None,
             port: Some(3080),
             created_at: "2026-08-28T00:00:00Z".into(),
+            dir: None,
         };
         let json = serde_json::to_value(InstanceView::from(&instance)).unwrap();
         assert_eq!(json["dshVersion"], "0.1.1");
@@ -661,6 +844,125 @@ pub(crate) mod tests {
     fn delete_missing_instance_is_error_free_and_idempotent() {
         let (_lock, tmp) = sandbox("idem");
         delete_instance("i-nothing").unwrap(); // 目录与注册表都没有 → 幂等成功
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 「添加已有文件夹」全环（2026-09-12 追加批次）：裸 DSH 目录原地注册 →
+    /// instance_dir 解析到外部路径 → 重复注册拒绝 → 删除仅解除关联、文件夹保留。
+    #[test]
+    fn register_external_references_in_place_and_unlink_keeps_folder() {
+        let (_lock, tmp) = sandbox("external");
+        // 伪造一个裸 DSH 安装目录（无 instance.json，有 app 下本体 manifest）。
+        let ext = tmp.join("my-dsh-folder");
+        let pkg = ext
+            .join("app")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{ "name": "@deepseek-ai/dsh", "version": "0.1.1-rc.2" }"#,
+        )
+        .unwrap();
+
+        let instance = register_external(ext.to_str().unwrap()).unwrap();
+        assert_eq!(instance.dsh_version.as_deref(), Some("0.1.1-rc.2"));
+        assert_eq!(instance.dir.as_deref(), Some(ext.to_str().unwrap()));
+        assert!(ext.join("instance.json").is_file(), "外部目录应写入实例元数据");
+        // instance_dir 解析到外部路径（profiles/sessions 等都落那里）。
+        assert_eq!(instance_dir(&instance.id).unwrap(), ext);
+        // 重名自动去重：再注册同名文件夹（换内容目录）不冲突。
+        // 同一文件夹重复注册拒绝。
+        assert!(register_external(ext.to_str().unwrap()).is_err());
+
+        // 删除 = 仅解除关联；文件夹与数据原样保留。
+        delete_instance(&instance.id).unwrap();
+        assert!(
+            !load_registry()
+                .unwrap()
+                .instances
+                .iter()
+                .any(|i| i.id == instance.id),
+            "注册表应已摘除"
+        );
+        assert!(ext.is_dir(), "外部文件夹必须原样保留");
+        assert!(pkg.join("package.json").is_file());
+
+        // 缺 instance.json 又缺 DSH 本体的目录拒绝并说明。
+        let empty = tmp.join("empty-folder");
+        std::fs::create_dir_all(&empty).unwrap();
+        let err = register_external(empty.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("instance.json") && err.contains("本体"), "实际：{err}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 外部实例不共享 skills（2026-09-20 需求方裁决方案 A，审查 P2-05）：
+    /// 「打开 skills」解析到其自身目录、不建联接、不把用户技能迁入共享区。
+    /// 注册命令层（lib.rs）同样只对托管实例调 ensure_skills_link。
+    #[test]
+    fn external_instance_skills_stay_local() {
+        let (_lock, tmp) = sandbox("external-skills");
+        let ext = tmp.join("my-dsh-folder");
+        let pkg = ext
+            .join("app")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{ "name": "@deepseek-ai/dsh", "version": "0.1.1" }"#,
+        )
+        .unwrap();
+        // 用户文件夹里已有的技能数据。
+        std::fs::create_dir_all(ext.join("skills").join("user-skill")).unwrap();
+        std::fs::write(ext.join("skills").join("user-skill").join("SKILL.md"), b"x").unwrap();
+
+        let instance = register_external(ext.to_str().unwrap()).unwrap();
+        let shared = crate::paths::shared_skills_dir().unwrap();
+        assert!(
+            !shared.join("user-skill").exists(),
+            "用户技能不得被迁入共享区"
+        );
+        // 打开落点 = 其自身 skills 目录。
+        let dir = skills_display_dir(&instance).unwrap();
+        assert_eq!(dir, ext.join("skills"));
+        assert!(dir.join("user-skill").join("SKILL.md").is_file(), "用户数据原样保留");
+        assert!(!dir.is_symlink(), "外部实例 skills 不得被替换为联接");
+
+        // 对照：托管实例仍走共享联接（既有全环测试覆盖，此处只锁外部分支）。
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// skills 全局共享全环（2026-09-12 需求变更）：联接建立 → 经链接写文件落
+    /// 共享区 → 存量真实目录并入 → 删除实例摘链接、共享内容保留。
+    #[test]
+    fn skills_shared_via_link_and_survive_instance_delete() {
+        let (_lock, tmp) = sandbox("skills-shared");
+        let instance = create_instance("技能共享", "web").unwrap();
+        ensure_skills_link(&instance.id).unwrap();
+        let link = instance_dir(&instance.id).unwrap().join("skills");
+        assert!(link.is_symlink(), "实例 skills 应为目录联接");
+
+        // 经链接写入 = 落共享区（skill_install 的落点语义）。
+        let shared = crate::paths::shared_skills_dir().unwrap();
+        std::fs::write(link.join("demo-skill"), b"x").unwrap();
+        assert!(shared.join("demo-skill").is_file(), "经链接写入应落共享目录");
+
+        // 存量真实目录并入共享区后替换为链接。
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::create_dir_all(link.join("local-skill")).unwrap();
+        ensure_skills_link(&instance.id).unwrap();
+        assert!(link.is_symlink());
+        assert!(shared.join("local-skill").is_dir(), "存量本地技能应并入共享区");
+        assert!(shared.join("demo-skill").is_file());
+
+        // 删除实例：联接摘除，共享内容原样保留。
+        delete_instance(&instance.id).unwrap();
+        assert!(!link.exists(), "删除实例应摘除联接");
+        assert!(shared.join("demo-skill").is_file(), "共享技能绝不随实例删除");
+
         std::fs::remove_dir_all(&tmp).ok();
     }
 

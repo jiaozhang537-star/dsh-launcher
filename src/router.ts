@@ -10,10 +10,8 @@ export interface PageDefinition {
    * 全局事件订阅与定时器，防止每次进入页面累积注册监听器。
    */
   unmount?: () => void;
-  /** 二级页：不进顶栏导航；顶栏左侧显示返回箭头 + 动态标题。 */
+  /** 二级页：不进顶栏导航；顶栏左侧显示返回箭头 + 页面名。 */
   secondary?: true;
-  /** 二级页顶栏标题（返回箭头旁）；导航页无标题。 */
-  title?: () => string;
 }
 
 export const DEFAULT_PAGE_ID = "launch";

@@ -49,7 +49,7 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
   sourceSel.value = "all";
   sourceSel.title = "技能分发源当前为 GitHub `dsh-skill` 话题聚合（T-4 裁决）";
   const searchBtn = el("button", { type: "button", class: "btn btn--ghost" }, ["搜索"]);
-  const resetBtn = el("button", { type: "button", class: "btn btn--muted" }, ["重置条件"]);
+  const resetBtn = el("button", { type: "button", class: "btn btn--line" }, ["重置条件"]);
 
   const searchCard = el("section", { class: "card settings-card" }, [
     el("h2", { class: "card__title" }, ["搜索 Skill"]),

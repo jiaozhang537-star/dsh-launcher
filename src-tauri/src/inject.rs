@@ -21,7 +21,11 @@ use crate::instances;
 use crate::paths;
 
 /// 一份可注入配置（默认模板与实例覆盖共用此结构）。
+/// IPC 键为 camelCase（前端 services/instances.ts 同名视图）——2026-09-20
+/// 实机走查实证：缺 rename 时前端发的 `agentsMd` 被静默丢弃，版本级覆盖
+/// 永远存不进去（单测走 Rust 直调暴露不了 IPC 键型）。
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InjectConfig {
     /// settings.yaml 的内容：顶层键 = DSH 插件命名空间（如 `llm-deepseek`）。
     #[serde(default)]
@@ -30,7 +34,8 @@ pub struct InjectConfig {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// 实例级 AGENTS.md 覆盖（版本设置页输入框落点）。None = 继承全局默认。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// alias 保留旧蛇形键的读取兼容（手工编辑过的存量文件）。
+    #[serde(default, alias = "agents_md", skip_serializing_if = "Option::is_none")]
     pub agents_md: Option<String>,
 }
 
@@ -126,11 +131,14 @@ pub fn get_override(id: &str) -> Result<InjectConfig, String> {
     read_inject_file(instance_inject_file(id)?)
 }
 
-/// 写实例覆盖（先校验 env 名单；实例必须已存在）。
+/// 写实例覆盖（先校验 env 名单；实例必须已存在）。保存后**立即物化**
+/// AGENTS.md（DSH 每轮对话重读该文件，运行中实例下一条消息即生效）。
 pub fn set_override(id: &str, config: &InjectConfig) -> Result<(), String> {
     instances::get_instance(id)?;
     validate_env(&config.env)?;
-    write_inject_file(instance_inject_file(id)?, config)
+    write_inject_file(instance_inject_file(id)?, config)?;
+    materialize_agents_md(id)?;
+    Ok(())
 }
 
 /// 计算生效配置 = 全局默认 ⊕ 实例覆盖（覆盖优先）。
@@ -169,6 +177,10 @@ pub fn get_global_agents_md() -> Result<Option<String>, String> {
 }
 
 /// 写全局 AGENTS.md；None = 删除（未设置）。原子落盘。
+/// 保存后对所有「未设版本级覆盖」的实例**立即物化**——DSH 每轮对话重读
+/// `$DSH_HOME/AGENTS.md`（侦察实证：无文件监听但按轮询版本，改文件下一条
+/// 消息即生效），因此全局改动即时可见，无需重启。单实例物化失败不阻塞保存
+/// （best-effort，该实例下次启动会再物化）。
 pub fn set_global_agents_md(content: Option<&str>) -> Result<(), String> {
     let path = global_agents_md_path()?;
     match content {
@@ -177,7 +189,6 @@ pub fn set_global_agents_md(content: Option<&str>) -> Result<(), String> {
                 std::fs::remove_file(&path)
                     .map_err(|e| format!("删除 {} 失败：{e}", path.display()))?;
             }
-            Ok(())
         }
         Some(text) => {
             if let Some(parent) = path.parent() {
@@ -188,9 +199,14 @@ pub fn set_global_agents_md(content: Option<&str>) -> Result<(), String> {
             std::fs::write(&tmp, text).map_err(|e| format!("写入 {} 失败：{e}", tmp.display()))?;
             std::fs::rename(&tmp, &path)
                 .map_err(|e| format!("替换 {} 失败：{e}", path.display()))?;
-            Ok(())
         }
     }
+    for instance in instances::list_instances()? {
+        if get_override(&instance.id)?.agents_md.is_none() {
+            let _ = materialize_agents_md(&instance.id);
+        }
+    }
+    Ok(())
 }
 
 /// 实例生效的 AGENTS.md：实例覆盖优先，否则继承全局默认。
@@ -200,6 +216,32 @@ pub fn effective_agents_md(id: &str) -> Result<Option<String>, String> {
         return Ok(Some(text));
     }
     get_global_agents_md()
+}
+
+/// 把生效的 AGENTS.md 物化到 `<instance_dir>/AGENTS.md`：有内容 → 原子重写；
+/// 生效为空 → 删除存量（启动器拥有该文件生命周期：残留旧指令会被 DSH 继续
+/// 读取，"清空=没有指令" 必须落实为删文件）。返回写入路径（删除/无内容 = None）。
+fn materialize_agents_md(id: &str) -> Result<Option<PathBuf>, String> {
+    let dir = instances::instance_dir(id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 {} 失败：{e}", dir.display()))?;
+    let target = dir.join("AGENTS.md");
+    match effective_agents_md(id)? {
+        Some(text) => {
+            let tmp = target.with_extension("md.tmp-writing");
+            std::fs::write(&tmp, &text)
+                .map_err(|e| format!("写入 {} 失败：{e}", tmp.display()))?;
+            std::fs::rename(&tmp, &target)
+                .map_err(|e| format!("替换 {} 失败：{e}", target.display()))?;
+            Ok(Some(target))
+        }
+        None => {
+            if target.exists() {
+                std::fs::remove_file(&target)
+                    .map_err(|e| format!("删除 {} 失败：{e}", target.display()))?;
+            }
+            Ok(None)
+        }
+    }
 }
 
 /// 渲染 settings.yaml 文本（JSON → YAML；空对象产出空映射文档）。
@@ -224,8 +266,10 @@ pub fn render_env(env: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// 把生效配置写入实例目录：settings.yaml + .env + AGENTS.md（若生效内容非空），
-/// 全部成功才算成功；任一步失败即中止且不留半成品（全部临时文件 + 改名）。
+/// 把生效配置写入实例目录：settings.yaml + .env + AGENTS.md（若生效内容非空）。
+/// 原子性口径：**单文件**临时写 + 改名（写盘中断不留坏文件）；三文件组并非
+/// 原子——后一步失败时前面的文件已替换（如 AGENTS.md 物化失败而
+/// settings/.env 已更新），内容都是合法产物，下次物化/启动自愈。
 pub fn write_instance_files(id: &str) -> Result<Vec<PathBuf>, String> {
     let config = effective_config(id)?;
     validate_env(&config.env)?;
@@ -247,15 +291,10 @@ pub fn write_instance_files(id: &str) -> Result<Vec<PathBuf>, String> {
         written.push(target.clone());
     }
 
-    // AGENTS.md 物化（FILE-LAYOUT）：实例覆盖优先、否则全局默认；都未设置时
-    // 不写也不删——实例目录里的存量文件可能是用户手放的，启动器不吞。
-    if let Some(text) = effective_agents_md(id)? {
-        let target = dir.join("AGENTS.md");
-        let tmp = target.with_extension("md.tmp-writing");
-        std::fs::write(&tmp, &text).map_err(|e| format!("写入 {} 失败：{e}", tmp.display()))?;
-        std::fs::rename(&tmp, &target)
-            .map_err(|e| format!("替换 {} 失败：{e}", target.display()))?;
-        written.push(target);
+    // AGENTS.md 物化（FILE-LAYOUT）：实例覆盖优先、否则全局默认；生效为空时
+    // 删除存量文件（残留旧指令会被 DSH 继续读取——"清空=没有指令"）。
+    if materialize_agents_md(id)?.is_some() {
+        written.push(dir.join("AGENTS.md"));
     }
     Ok(written)
 }
@@ -437,7 +476,8 @@ mod tests {
             Some("实例规则\n")
         );
 
-        // 清除实例覆盖后：全局也未设置 → 生效 None；已物化的存量文件不被吞。
+        // 清除实例覆盖后：全局也未设置 → 生效 None；**存量文件被删除**
+        // （清空=没有指令；残留旧内容会被 DSH 继续读取——侦察指出的坑）。
         set_override(
             &instance.id,
             &InjectConfig {
@@ -448,8 +488,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(effective_agents_md(&instance.id).unwrap(), None);
+        assert!(
+            !dir.join("AGENTS.md").exists(),
+            "生效为空时应删除存量 AGENTS.md"
+        );
 
         instances::delete_instance(&instance.id).unwrap();
+    }
+
+    #[test]
+    fn ipc_camel_case_agents_md_roundtrips() {
+        // IPC 键型回归（2026-09-20 实机走查 P0）：前端发 `agentsMd`（camelCase）
+        // 必须落进 agents_md，序列化回读也用 camelCase——缺 rename 时版本级
+        // AGENTS.md 覆盖被静默丢弃。settings/env 单词键两种命名同形，一并钉住。
+        let value: InjectConfig = serde_json::from_str(
+            r#"{ "settings": {}, "env": {}, "agentsMd": "局部规则" }"#,
+        )
+        .unwrap();
+        assert_eq!(value.agents_md.as_deref(), Some("局部规则"));
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(json.contains("\"agentsMd\""), "IPC 序列化必须是 camelCase：{json}");
+
+        // 兼容：旧键 agents_md（若有手工文件）也能读出。
+        let legacy: InjectConfig =
+            serde_json::from_str(r#"{ "agents_md": "旧键内容" }"#).unwrap();
+        assert_eq!(legacy.agents_md.as_deref(), Some("旧键内容"));
     }
 
     #[test]

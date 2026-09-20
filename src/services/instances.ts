@@ -10,6 +10,8 @@ export interface Instance {
   port: number | null;
   lastLaunchedAt: string | null;
   createdAt: string;
+  /** 外部实例（原地引用）：绝对路径；null = 托管实例（versions/<id>/）。 */
+  dir: string | null;
 }
 
 /** 注入配置：settings 为 DSH settings.yaml 的 JSON 形态（顶层键=插件命名空间），env 为 .env 键值。 */
@@ -39,6 +41,28 @@ export async function getInstancesDir(): Promise<string> {
 /** 创建实例（名称 + 初始 profile），返回新实例元数据。 */
 export function createInstance(name: string, profile: string): Promise<Instance> {
   return invoke<Instance>("instance_create", { name, profile });
+}
+
+/** 「添加已有文件夹」：把既有 DSH 实例目录原地注册为实例（数据留在原地）。 */
+export function registerExternalInstance(folder: string): Promise<Instance> {
+  return invoke<Instance>("instance_register_external", { folder });
+}
+
+/** 系统文件夹选择框；取消 = null。 */
+export async function pickFolder(): Promise<string | null> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = (await open({
+    directory: true,
+    multiple: false,
+    title: "选择要添加的实例文件夹（需含 instance.json 或已安装 DSH 本体）",
+  })) as string | string[] | null;
+  if (Array.isArray(picked)) return picked[0] ?? null;
+  return picked;
+}
+
+/** 在文件管理器中打开实例子目录（skills / sessions / sources）。 */
+export function openInstanceSubdir(id: string, which: "skills" | "sessions" | "sources"): Promise<string> {
+  return invoke<string>("instance_open_subdir", { id, which });
 }
 
 /** 删除实例（整目录移除，零残留；运行中的实例会因文件占用而失败）。 */

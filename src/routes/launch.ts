@@ -16,11 +16,8 @@ import type { PageDefinition } from "../router";
 import { navigate } from "../router";
 import { getStatus, setKey, KEY_MASK, type KeyvaultStatus } from "../services/keyvault";
 import { fetchProvidersView } from "../services/providers";
+import { providerIconPath } from "../lib/providerIcon";
 
-/** simple-icons CDN（CC0）图标 URL（与设置页同款；失败回落字母块）。 */
-function providerIconUrl(slug: string): string {
-  return `https://cdn.simpleicons.org/${slug}/1370F3`;
-}
 import {
   getInjectOverride,
   listInstances,
@@ -768,12 +765,12 @@ export const launchPage: PageDefinition = {
 
     const selectBtn = el("button", { type: "button", class: "btn btn--line" }, ["版本选择"]);
     selectBtn.addEventListener("click", () => {
-      if (selectedId) setSelectedInstance(selectedId, nameOf(selectedId));
+      if (selectedId) setSelectedInstance(selectedId);
       navigate("instance-select");
     });
     const configBtn = el("button", { type: "button", class: "btn btn--line" }, ["版本设置"]);
     configBtn.addEventListener("click", () => {
-      if (selectedId) setSelectedInstance(selectedId, nameOf(selectedId));
+      if (selectedId) setSelectedInstance(selectedId);
       navigate("instance-settings");
     });
 
@@ -1162,7 +1159,7 @@ export const launchPage: PageDefinition = {
       for (const action of errorModal.actions ?? []) {
         const pageId = ACTION_PAGES[action];
         if (!pageId) continue;
-        const btn = el("button", { type: "button", class: "btn btn--muted" }, [
+        const btn = el("button", { type: "button", class: "btn btn--line" }, [
           ACTION_LABELS[action] ?? "去处理",
         ]);
         btn.addEventListener("click", () => {
@@ -1173,14 +1170,14 @@ export const launchPage: PageDefinition = {
         foot.append(btn);
       }
       if (hasLog) {
-        const logBtn = el("button", { type: "button", class: "btn btn--muted" }, ["日志"]);
+        const logBtn = el("button", { type: "button", class: "btn btn--line" }, ["日志"]);
         logBtn.addEventListener("click", () => {
           logModalId = selectedId;
           renderLogModal();
         });
         foot.append(logBtn);
       }
-      const ok = el("button", { type: "button", class: "btn btn--muted" }, ["确定"]);
+      const ok = el("button", { type: "button", class: "btn btn--line" }, ["确定"]);
       ok.addEventListener("click", () => {
         errorModal = null;
         renderErrorModal();
@@ -1228,7 +1225,7 @@ export const launchPage: PageDefinition = {
             ...view.catalog.map((e) => ({
               id: e.id,
               label: e.label,
-              icon: e.icon ? providerIconUrl(e.icon) : undefined,
+              icon: providerIconPath(e.id),
               monogram: e.label.charAt(0) || "?",
             })),
             ...view.custom.map((c) => ({

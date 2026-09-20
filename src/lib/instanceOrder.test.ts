@@ -11,6 +11,7 @@ function inst(partial: Partial<Instance> & { id: string }): Instance {
     port: 3080,
     lastLaunchedAt: null,
     createdAt: "2026-01-01T00:00:00Z",
+    dir: null,
     ...partial,
   };
 }

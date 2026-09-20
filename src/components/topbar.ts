@@ -49,7 +49,7 @@ export function createTopbar(): HTMLElement {
     nav.append(btn);
   }
 
-  // 二级页形态：品牌隐藏（主导航保留），← 返回 + 动态标题占据左上角品牌位。
+  // 二级页形态：品牌隐藏（主导航保留），← 返回 + 页面名占据左上角品牌位。
   const backBtn = el(
     "button",
     { type: "button", class: "topbar__back", "aria-label": "返回", title: "返回" },
@@ -66,7 +66,7 @@ export function createTopbar(): HTMLElement {
     secWrap.hidden = !isSecondary;
     bar.classList.toggle("topbar--secondary", isSecondary);
     if (isSecondary) {
-      secTitle.textContent = def?.title?.() ?? def?.navLabel ?? "";
+      secTitle.textContent = def?.navLabel ?? "";
     }
   };
 

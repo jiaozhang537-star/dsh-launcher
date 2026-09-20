@@ -44,3 +44,13 @@ export function cancelSourceDownload(): Promise<void> {
 export function openSourceDir(version: string, instanceId: string | null = null): Promise<void> {
   return invoke<void>("source_open_dir", { version, instanceId });
 }
+
+/** 删除版本内的源码归档目录（不存在时幂等成功）。 */
+export function deleteInstanceSources(instanceId: string): Promise<void> {
+  return invoke<void>("source_delete", { instanceId });
+}
+
+/** 版本内源码归档是否已下载（卡片状态回显）。 */
+export function instanceSourcesDownloaded(instanceId: string): Promise<boolean> {
+  return invoke<boolean>("source_status", { instanceId });
+}

@@ -32,14 +32,6 @@ pub enum PackType {
 }
 
 impl PackType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PackType::Plugins => "plugins",
-            PackType::Settings => "settings",
-            PackType::Mixed => "mixed",
-        }
-    }
-
     /// 由内容推导类型（导出侧用；导入侧以清单声明为准并做一致性校验）。
     pub fn derive(has_plugins: bool, has_settings: bool) -> PackType {
         match (has_plugins, has_settings) {
@@ -247,33 +239,6 @@ pub fn parse_and_validate(text: &str) -> Result<Manifest, String> {
     Ok(m)
 }
 
-/// 导入确认弹窗的摘要行（类型 + 数量），纯函数可测。
-pub fn summary(m: &Manifest) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !m.plugins.is_empty() {
-        parts.push(format!("{} 个插件", m.plugins.len()));
-    }
-    if let Some(s) = &m.settings {
-        let mut s_parts: Vec<String> = Vec::new();
-        if !s.vendors.is_empty() {
-            s_parts.push(format!("{} 个提供商", s.vendors.len()));
-        }
-        if !s.hotkeys.is_empty() {
-            s_parts.push("热键".into());
-        }
-        if !s.inject_settings.is_empty() {
-            s_parts.push("注入配置".into());
-        }
-        if s.agents_md.is_some() {
-            s_parts.push("AGENTS.md".into());
-        }
-        if !s_parts.is_empty() {
-            parts.push(format!("设置（{}）", s_parts.join("、")));
-        }
-    }
-    format!("[{}] {}", m.pack_type.as_str(), parts.join(" + "))
-}
-
 // ============================================================================
 // 导出管线（T-3 定稿：自包含离线 tgz）
 // ============================================================================
@@ -339,6 +304,21 @@ fn collect_settings(opts: &ExportOptions) -> Result<SettingsSection, String> {
     Ok(section)
 }
 
+/// 暂存目录里唯一的 `.tgz` 即 `npm pack` 的产物（产物名不可从 stdout 可靠
+/// 解析）；0 个或 ≥2 个都视为该通道产物异常。
+fn single_produced_tgz(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let produced: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("读取暂存目录失败：{e}"))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |ext| ext == "tgz"))
+        .collect();
+    match produced.len() {
+        1 => Ok(produced.into_iter().next().expect("len == 1 已判定")),
+        n => Err(format!("产物异常：期望 1 个 tgz，实际 {n} 个")),
+    }
+}
+
 /// `npm pack <spec>` 拉插件源码 tarball 到 `dest_dir`（npmmirror 优先、失败回落
 /// 官方——与插件安装同一通道链，经 `npm_config_registry` 注入）。成功返回
 /// 下载产物 tgz 的绝对路径。
@@ -362,21 +342,13 @@ fn npm_pack(
             .creation_flags_cv();
         match cmd.output() {
             Ok(out) if out.status.success() => {
-                // npm pack 的产物名不可从 stdout 可靠解析——dest_dir 里唯一的
-                // .tgz 即产物（目录为本调用独占的暂存区）。
-                let mut produced: Vec<std::path::PathBuf> = std::fs::read_dir(dest_dir)
-                    .map_err(|e| format!("读取暂存目录失败：{e}"))?
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().map_or(false, |ext| ext == "tgz"))
-                    .collect();
-                if produced.len() == 1 {
-                    return Ok(produced.remove(0));
+                // npm pack 不清空 --pack-destination：目录必须由调用方保证为本
+                // 次调用独占（见 export_pack_inner 的每插件子目录），否则前一
+                // 个插件的残留会污染「恰 1 个 tgz」的产物判定。
+                match single_produced_tgz(dest_dir) {
+                    Ok(path) => return Ok(path),
+                    Err(e) => attempts.push(format!("[通道 {registry_base}] {e}")),
                 }
-                attempts.push(format!(
-                    "[通道 {registry_base}] 产物异常：期望 1 个 tgz，实际 {} 个",
-                    produced.len()
-                ));
             }
             Ok(out) => {
                 let tail = String::from_utf8_lossy(&out.stderr);
@@ -470,12 +442,12 @@ fn export_pack_inner(
             .filter(|p| matches!(p.group, PluginGroup::Thirdparty))
             .map(|p| (p.name.as_str(), p))
             .collect();
-        let pack_dir = temp.join("pack");
-        std::fs::create_dir_all(&pack_dir).map_err(|e| format!("创建暂存目录失败：{e}"))?;
+        let pack_root = temp.join("pack");
+        std::fs::create_dir_all(&pack_root).map_err(|e| format!("创建暂存目录失败：{e}"))?;
         let instance = crate::instances::get_instance(&opts.instance_id)?;
         let node_exe = crate::dsh_install::resolve_install_node(&instance, &mut |_| {})?;
         let npm_cli = crate::dsh_install::npm_cli_of(&node_exe)?;
-        for name in &opts.plugins {
+        for (idx, name) in opts.plugins.iter().enumerate() {
             let row = available
                 .get(name.as_str())
                 .ok_or_else(|| format!("插件 {name} 不在该实例的第三方已装清单中"))?;
@@ -484,6 +456,11 @@ fn export_pack_inner(
                     "无法确定 {name} 的已装版本，无法打包——可到插件市场重装后再导出"
                 ));
             }
+            // 每个插件独立暂存子目录：npm pack 不清空 --pack-destination，共用
+            // 同一目录时前一插件的产物会让「恰 1 个 tgz」判定从第二个插件起
+            // 必然失败（2026-09-20 审查 P1-01，真机复现 .recon/r4-lab）。
+            let pack_dir = pack_root.join(idx.to_string());
+            std::fs::create_dir_all(&pack_dir).map_err(|e| format!("创建暂存目录失败：{e}"))?;
             let tgz = npm_pack(&node_exe, &npm_cli, &format!("{name}@{}", row.version), &pack_dir, progress)?;
             let rel = plugin_tarball_rel_path(name, &row.version);
             staged.push((tgz, rel.clone()));
@@ -575,6 +552,13 @@ fn extract_tgz_to(tgz: &std::path::Path, dest: &std::path::Path) -> Result<(), S
             std::fs::create_dir_all(&out).map_err(|e| format!("创建 {} 失败：{e}", out.display()))?;
             continue;
         }
+        // 远端内容 fail-closed：目录条目之外仅放行普通文件——符号链接/硬链接
+        // 条目会被 unpack 原样落链（目标可为任意路径），一律拒绝解压。
+        if !entry.header().entry_type().is_file() {
+            return Err(format!(
+                "包内包含非法条目类型（符号链接/硬链接/特殊文件）：{name}——拒绝解压"
+            ));
+        }
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("创建 {} 失败：{e}", parent.display()))?;
         }
@@ -658,6 +642,9 @@ fn import_pack_inner(
 
     // ── 插件环节：逐个 file: 安装，失败反向回滚 ──
     if !manifest.plugins.is_empty() {
+        // 实例必须存在（fail loud 可读）；此前用于 spec 归一化的 profile 已随
+        // 归一化撤销而不需要。
+        crate::instances::get_instance(instance_id)?;
         let mut installed: Vec<crate::market_install::PluginInstallOutcome> = Vec::new();
         for entry in &manifest.plugins {
             if entry.file.is_empty() {
@@ -683,10 +670,27 @@ fn import_pack_inner(
                 let err = format!("包内缺少 {} 的 tarball（{}）", entry.name, entry.file);
                 return Err(rollback_plugins(&installed, &err, progress));
             }
+            // tarball 落实例 `imported/` 留档（FILE-LAYOUT §3）：file: spec 必须
+            // 指向导入结束后仍然存在的路径——pnpm 的 add/remove 都会重链 file:
+            // 依赖，指向已删除的导入暂存区会让后续一切插件操作 ENOENT
+            // （双包 e2e 实证 2026-09-20）。
+            let imported_dir = crate::instances::instance_dir(instance_id)?.join("imported");
+            std::fs::create_dir_all(&imported_dir)
+                .map_err(|e| format!("创建导入留档目录失败：{e}"))?;
+            let file_name = entry
+                .file
+                .rsplit('/')
+                .next()
+                .unwrap_or("plugin.tgz")
+                .to_string();
+            let persistent = imported_dir.join(file_name);
+            std::fs::copy(&tarball, &persistent)
+                .map_err(|e| format!("留存 {} 失败：{e}", persistent.display()))?;
             progress(format!("正在离线安装 {} {}…", entry.name, entry.version));
             // file: tarball 直装（pnpm/npm spec 语义）；个别 pnpm 版本不收
-            // tarball 时回落到解开 package/ 目录再 file:。
-            let spec = format!("file:{}", tarball.display());
+            // tarball 时回落到解开 package/ 目录再 file:（罕见路径，真实环境
+            // 未观测到触发；其 spec 指向导入暂存区，导入后即失效）。
+            let spec = format!("file:{}", persistent.display());
             let outcome = match crate::market_install::plugin_add(instance_id, &spec, progress) {
                 Ok(outcome) => Ok(outcome),
                 Err(first_err) => {
@@ -703,7 +707,14 @@ fn import_pack_inner(
                 }
             };
             match outcome {
-                Ok(o) => installed.push(o),
+                Ok(o) => {
+                    // spec 保持 file: 原样、不归一为 ^版本：pnpm 每次安装都会重
+                    // 解析清单里 spec 与 lockfile 不一致的依赖——归一后的未发布
+                    // 包会被回 registry 拉 → 404 → 多插件导入从第二个起必挂
+                    // （双包 e2e 实证 2026-09-20，撤销走查反馈批次②的归一化；
+                    // 「不误入自建组」由 group_plugins 的 *.tgz 兜底保证）。
+                    installed.push(o);
+                }
                 Err(e) => return Err(rollback_plugins(&installed, &e, progress)),
             }
         }
@@ -755,7 +766,8 @@ fn rollback_plugins(
         lines.push("未安装任何插件，无需回滚。".into());
     } else {
         lines.push(format!("正在回滚已安装的 {} 个插件…", installed.len()));
-        for outcome in installed {
+        // 真反向：后装的先拆（含互相依赖的包时先摘依赖方，残留面最小）。
+        for outcome in installed.iter().rev() {
             progress(format!("正在回滚 {}…", outcome.package_name));
             match crate::plugin_manage::remove(&outcome.instance_id, &outcome.package_name, &mut |_| {}) {
                 Ok(()) => lines.push(format!("已回滚 {}", outcome.package_name)),
@@ -894,8 +906,25 @@ fn apply_settings(
                 }
                 .to_string());
             }
-            if agents.is_some() {
-                report.applied.push("AGENTS.md".into());
+            // 报告如实（2026-09-20 二轮实机发现）：AGENTS.md 按落点分半写入——
+            // 只有对应那一半真的写了才计入 applied；另一半为空时改为可读说明，
+            // 不再出现「报告已应用、文件未写」的误导。
+            match agents.map(|a| match target {
+                SettingsTarget::Global => a.global.is_some(),
+                SettingsTarget::Instance => a.instance.is_some(),
+            }) {
+                Some(true) => report.applied.push("AGENTS.md".into()),
+                Some(false) => {
+                    let (present, landing, hint) = match target {
+                        SettingsTarget::Global => ("版本级", "全局", "只写入下方所选版本"),
+                        SettingsTarget::Instance => ("全局", "版本级", "写入全局默认"),
+                    };
+                    report.warnings.push(format!(
+                        "包内 AGENTS.md 仅含{present}内容、当前落点为{landing}——未写入\
+                         （如需应用，导入时改选「{hint}」）"
+                    ));
+                }
+                None => {}
             }
             // 物化（settings.yaml/.env/AGENTS.md）：实例落点立即写盘；全局落点
             // 由各实例下次启动时统一物化，这里不逐实例改文件。
@@ -937,7 +966,6 @@ mod tests {
         assert_eq!(m.pack_type, PackType::Plugins);
         assert_eq!(m.plugins.len(), 2);
         assert_eq!(m.plugins[0].file, "packages/deepseek-ai-dsh-base-1.0.0.tgz");
-        assert_eq!(summary(&m), "[plugins] 2 个插件");
     }
 
     #[test]
@@ -963,7 +991,6 @@ mod tests {
         assert_eq!(s.vendors.len(), 2);
         assert_eq!(s.vendors[0].models, vec!["deepseek-v4-pro"]);
         assert_eq!(s.agents_md.as_ref().unwrap().global.as_deref(), Some("全局规则"));
-        assert!(summary(&m).contains("AGENTS.md"));
     }
 
     #[test]
@@ -1155,6 +1182,149 @@ mod tests {
     }
 
     #[test]
+    fn single_produced_tgz_requires_exactly_one() {
+        let base = std::env::temp_dir().join(format!("dsh-modpack-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // 0 个：暂存目录为空 → 通道产物异常。
+        assert!(single_produced_tgz(&base).is_err());
+
+        // 1 个：唯一 tgz 即产物（非 tgz 文件不参与计数）。
+        std::fs::write(base.join("pkg-1.0.0.tgz"), b"x").unwrap();
+        std::fs::write(base.join("npm-output.log"), b"stdout noise").unwrap();
+        let got = single_produced_tgz(&base).unwrap();
+        assert_eq!(got.file_name().unwrap().to_string_lossy(), "pkg-1.0.0.tgz");
+
+        // 2 个：前一插件的残留即污染判定（多插件共用暂存目录的旧缺陷形态，
+        // 审查 P1-01）——判定层必须报异常，由调用方的每插件子目录规避。
+        std::fs::write(base.join("other-2.0.0.tgz"), b"y").unwrap();
+        let err = single_produced_tgz(&base).unwrap_err();
+        assert!(err.contains("实际 2 个"), "实际：{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn extract_tgz_rejects_symlink_entries() {
+        let base = std::env::temp_dir().join(format!("dsh-modpack-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let tgz = base.join("evil.tgz");
+        let file = std::fs::File::create(&tgz).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        // 符号链接条目指向包外：unpack 语义会原样落链，必须在条目类型层拒绝。
+        // （append_link 不代设类型，须显式 Symlink；`..` 只允许出现在链接
+        // 目标里——归档路径本身被 tar-rs 拒绝含 `..`。）
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Symlink);
+        link_header.set_size(0);
+        link_header.set_mode(0o777);
+        link_header.set_cksum();
+        builder
+            .append_link(
+                &mut link_header,
+                "packages/evil.tgz",
+                "../../../outside.txt",
+            )
+            .unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let out = base.join("out");
+        let err = extract_tgz_to(&tgz, &out).unwrap_err();
+        assert!(err.contains("非法条目类型"), "实际：{err}");
+        assert!(
+            !out.join("packages").join("evil.tgz").exists(),
+            "符号链接条目不得落盘"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn settings_only_import_needs_no_instance_for_global_target() {
+        let (_lock, tmp) = crate::instances::tests::sandbox("modpack-noinstance");
+        // 全新启动器：一个实例都没有（审查 P1-02 回归——纯设置包 + 全局落点
+        // 是「分享配置给还没装启动器的人」的核心路径）。
+        let manifest: Manifest = serde_json::from_value(json!({
+            "formatVersion": 1, "type": "settings", "name": "新机器配置",
+            "settings": {
+                "hotkeys": { "nav-launch": "Alt+9" },
+                "agentsMd": { "global": "全局规则" }
+            }
+        }))
+        .unwrap();
+        let dest = build_pack(&tmp.join("packsrc"), &manifest, &[]);
+        let mut sink = |_d: String| {};
+
+        let report = import_pack(&dest, "", Some(SettingsTarget::Global), &mut sink).unwrap();
+        assert!(report.applied.contains(&"AGENTS.md".to_string()));
+        assert!(report.applied.iter().any(|a| a.contains("热键")));
+        assert_eq!(
+            crate::inject::get_global_agents_md().unwrap().as_deref(),
+            Some("全局规则")
+        );
+        assert_eq!(
+            crate::hotkey_store::load().unwrap().get("nav-launch").map(String::as_str),
+            Some("Alt+9")
+        );
+
+        // Instance 落点仍要求实例存在，fail loud 可读。
+        let err = import_pack(&dest, "", Some(SettingsTarget::Instance), &mut sink).unwrap_err();
+        assert!(err.contains("实例不存在"), "实际：{err}");
+        crate::inject::set_global_agents_md(None).unwrap();
+    }
+
+    /// 报告如实（2026-09-20 二轮实机发现）：仅含全局内容的设置包走实例落点时，
+    /// 不得申报「AGENTS.md」已应用（实际未写），而应给出可读说明；同一包走
+    /// 全局落点则如实申报并写入。
+    #[test]
+    fn agents_md_report_matches_actual_landing() {
+        let (_lock, tmp) = crate::instances::tests::sandbox("modpack-agents-report");
+        let instance = crate::instances::create_instance("落点报告", "headless").unwrap();
+        let manifest: Manifest = serde_json::from_value(json!({
+            "formatVersion": 1, "type": "settings", "name": "仅全局",
+            "settings": { "agentsMd": { "global": "仅全局指令" } }
+        }))
+        .unwrap();
+        let dest = build_pack(&tmp.join("packsrc"), &manifest, &[]);
+        let mut sink = |_d: String| {};
+
+        // 实例落点：不申报、给说明、文件确未写。
+        let report =
+            import_pack(&dest, &instance.id, Some(SettingsTarget::Instance), &mut sink).unwrap();
+        assert!(
+            !report.applied.iter().any(|a| a == "AGENTS.md"),
+            "实际未写不得申报：{:?}",
+            report.applied
+        );
+        assert!(
+            report.warnings.iter().any(|w| w.contains("未写入") && w.contains("全局")),
+            "应给可读说明：{:?}",
+            report.warnings
+        );
+        let dir = crate::instances::instance_dir(&instance.id).unwrap();
+        assert!(!dir.join("AGENTS.md").exists(), "实例 AGENTS.md 不得被写");
+        assert!(crate::inject::get_override(&instance.id).unwrap().agents_md.is_none());
+
+        // 全局落点：如实申报，且根文件与实例物化到位。
+        let report =
+            import_pack(&dest, &instance.id, Some(SettingsTarget::Global), &mut sink).unwrap();
+        assert!(report.applied.iter().any(|a| a == "AGENTS.md"), "{:?}", report.applied);
+        assert!(!report.warnings.iter().any(|w| w.contains("未写入")));
+        assert_eq!(
+            crate::inject::get_global_agents_md().unwrap().as_deref(),
+            Some("仅全局指令")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENTS.md")).unwrap(),
+            "仅全局指令"
+        );
+        crate::inject::set_global_agents_md(None).unwrap();
+        crate::instances::delete_instance(&instance.id).unwrap();
+    }
+
+    #[test]
     fn import_missing_tarball_rolls_back_with_readable_error() {
         let (_lock, tmp) = crate::instances::tests::sandbox("modpack-rollback");
         let instance = crate::instances::create_instance("回滚", "headless").unwrap();
@@ -1219,10 +1389,11 @@ mod tests {
     }
 
     /// 真实链路 e2e（显式触发，与 market_install 真链测试同约定：本机需有一个
-    /// 已装 DSH 的实例）：本地目录离线 `npm pack` 出真 tarball → 组包 → 导入
-    /// 安装（file: 链）→ bundles 生效比对 → 清场。默认 `#[ignore]`。
+    /// 已装 DSH 的实例）：两个本地目录离线 `npm pack` 出真 tarball → 组双插件包
+    /// → 导入安装（file: 链）→ bundles 生效比对 → 官方链清场。双包是审查
+    /// P1-01 的回归形态（单包覆盖不了多插件路径）。默认 `#[ignore]`。
     #[test]
-    #[ignore = "真实实例：file: 离线安装 local-dsh-noop 全环"]
+    #[ignore = "真实实例：双插件 file: 离线安装 + 导入全环"]
     fn real_export_import_with_local_npm_pack() {
         let all = crate::instances::list_instances().expect("实例注册表可读");
         let target = all
@@ -1238,58 +1409,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        // 1) 本地假插件包（无依赖，离线可装；声明 dsh.bundle.patch 使其进 bundles）。
-        let pkg = tmp.join("local-dsh-noop");
-        std::fs::create_dir_all(&pkg).unwrap();
-        std::fs::write(
-            pkg.join("package.json"),
-            r#"{
-  "name": "local-dsh-noop",
-  "version": "0.0.1",
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
-}"#,
-        )
-        .unwrap();
-        std::fs::write(pkg.join("cordis.patch.yml"), "services: {}\n").unwrap();
-
-        // 2) npm pack（离线：本地目录参数）到暂存目录。
-        let pack_dir = tmp.join("pack-out");
-        std::fs::create_dir_all(&pack_dir).unwrap();
+        // 1) 两个本地假插件包（无依赖，离线可装；声明 dsh.bundle.patch 使其进 bundles）。
+        //    每包独立暂存子目录，与 export_pack_inner 的每插件暂存语义一致。
         let node_exe = which_node().expect("本机需有 node 在 PATH 上");
         let npm_cli = crate::dsh_install::npm_cli_of(&node_exe).unwrap();
-        let tgz = npm_pack(&node_exe, &npm_cli, pkg.to_string_lossy().as_ref(), &pack_dir, &mut |_d| {})
+        let mut staged: Vec<(std::path::PathBuf, String)> = Vec::new();
+        let mut entries: Vec<PluginEntry> = Vec::new();
+        for (name, version) in [("local-dsh-noop", "0.0.1"), ("local-dsh-noop-2", "0.0.2")] {
+            let pkg = tmp.join(name);
+            std::fs::create_dir_all(&pkg).unwrap();
+            std::fs::write(
+                pkg.join("package.json"),
+                format!(
+                    r#"{{
+  "name": "{name}",
+  "version": "{version}",
+  "dsh": {{ "bundle": {{ "patch": "./cordis.patch.yml" }} }}
+}}"#
+                ),
+            )
             .unwrap();
+            std::fs::write(pkg.join("cordis.patch.yml"), "services: {}\n").unwrap();
 
-        // 3) 组包（导出的 npm registry 链另有走查覆盖；这里直接以本地 tarball 为 staged 源）。
-        let rel = plugin_tarball_rel_path("local-dsh-noop", "0.0.1");
+            // npm pack（离线：本地目录参数）。
+            let pack_dir = tmp.join(format!("pack-out-{name}"));
+            std::fs::create_dir_all(&pack_dir).unwrap();
+            let tgz = npm_pack(
+                &node_exe,
+                &npm_cli,
+                pkg.to_string_lossy().as_ref(),
+                &pack_dir,
+                &mut |_d| {},
+            )
+            .unwrap();
+            let rel = plugin_tarball_rel_path(name, version);
+            staged.push((tgz, rel.clone()));
+            entries.push(PluginEntry {
+                name: name.into(),
+                version: version.into(),
+                source: "npm".into(),
+                file: rel,
+            });
+        }
+
+        // 2) 组包（导出的 npm registry 链另有走查覆盖；这里直接以本地 tarball 为 staged 源）。
         let manifest = Manifest {
             format_version: FORMAT_VERSION,
             pack_type: PackType::Plugins,
             name: "本地离线包".into(),
             generator: "test".into(),
             created_at: crate::instances::now_rfc3339(),
-            plugins: vec![PluginEntry {
-                name: "local-dsh-noop".into(),
-                version: "0.0.1".into(),
-                source: "npm".into(),
-                file: rel.clone(),
-            }],
+            plugins: entries,
             settings: None,
         };
         let dest = tmp.join("local.tgz");
-        write_tgz(&manifest, &[(tgz, rel)], &dest).unwrap();
+        write_tgz(&manifest, &staged, &dest).unwrap();
 
-        // 4) 导入：file: 安装链 + bundles 生效比对；结束清场。
+        // 3) 导入：双插件 file: 安装链 + bundles 生效比对。
         let mut sink = |d: String| println!("  [进度] {d}");
         let report = import_pack(&dest, &target.id, None, &mut sink).unwrap();
-        assert_eq!(report.installed.len(), 1);
-        assert_eq!(report.installed[0].package_name, "local-dsh-noop");
-        assert_eq!(report.installed[0].version, "0.0.1");
-        assert!(report.installed[0].bundle_activated, "插件应进入 bundles 层");
-        println!("导入全环通过：file: 离线安装 → bundles 生效");
+        assert_eq!(report.installed.len(), 2, "双插件应全部装齐");
+        assert!(
+            report
+                .installed
+                .iter()
+                .all(|o| o.package_name.starts_with("local-dsh-noop") && o.bundle_activated),
+            "两个插件都应进入 bundles 层：{:?}",
+            report.installed
+        );
+        println!("导入全环通过：双包 file: 离线安装 → bundles 生效");
 
-        crate::plugin_manage::remove(&target.id, "local-dsh-noop", &mut sink)
-            .expect("清场：官方链移除");
+        // 3.5) imported/ 留档与 spec 持久化（审查 P2-07 修复实证）。
+        let instance_dir = crate::instances::instance_dir(&target.id).unwrap();
+        let imported_dir = instance_dir.join("imported");
+        assert!(
+            imported_dir.join("local-dsh-noop-0.0.1.tgz").is_file()
+                && imported_dir.join("local-dsh-noop-2-0.0.2.tgz").is_file(),
+            "两个 tarball 都应留档 imported/"
+        );
+        let deps_text = std::fs::read_to_string(
+            instance_dir.join("profiles").join(&target.profile).join("package.json"),
+        )
+        .unwrap();
+        assert!(
+            deps_text.starts_with('{')
+                && deps_text.contains("\"file:")
+                && deps_text.contains("imported"),
+            "依赖 spec 应以 file: 指向 imported/ 留档：{deps_text}"
+        );
+
+        // 4) 清场：官方链逐个移除（remove 会重链 file: 依赖——留档缺失在此即炸，
+        // 这正是 2026-09-20 首跑暴露的缺陷形态，现由 imported/ 兜住）。
+        for name in ["local-dsh-noop", "local-dsh-noop-2"] {
+            crate::plugin_manage::remove(&target.id, name, &mut sink).expect("清场：官方链移除");
+        }
+        let _ = std::fs::remove_dir_all(&imported_dir);
     }
 
     /// PATH 上找 node.exe（测试辅助；找不到返回 None）。

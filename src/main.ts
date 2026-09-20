@@ -41,8 +41,9 @@ window.addEventListener("drop", (event) => {
   event.preventDefault();
   const files = event.dataTransfer?.files;
   if (!files || files.length === 0) return;
-  const file = files[0];
-  if (!/\.tgz$/i.test(file.name)) return;
+  // 多文件拖入取第一个 .tgz（其余忽略）；非 tgz 仅防导航不提示（误拖是常态）。
+  const file = Array.from(files).find((f) => /\.tgz$/i.test(f.name));
+  if (!file) return;
   void (async () => {
     try {
       const [{ invoke }, { openModpackImport }] = await Promise.all([

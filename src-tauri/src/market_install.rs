@@ -382,6 +382,22 @@ pub fn resolve_installed_manifest(
     Ok(None)
 }
 
+/// 解析已装包的目录（三级根扫描；找不到返回 None）——组合包要读包内
+/// `cordis.patch.yml`（patch 路径相对包根），仅有 manifest 内容不够。
+pub fn resolve_installed_package_dir(
+    instance_id: &str,
+    profile: &str,
+    package: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    for root in module_roots(instance_id, profile)? {
+        let dir = root.join(package);
+        if dir.join("package.json").is_file() {
+            return Ok(Some(dir));
+        }
+    }
+    Ok(None)
+}
+
 /// 从实例 profile 移除一个插件（官方 `dsh plugin remove` 链，reconcile 自动
 /// 同步 bundles）。阻塞调用——command 侧放 spawn_blocking。
 pub fn plugin_remove(instance_id: &str, package: &str, progress: &mut dyn FnMut(String)) -> Result<(), String> {

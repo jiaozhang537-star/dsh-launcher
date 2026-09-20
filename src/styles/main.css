@@ -2567,7 +2567,7 @@ html,body,#app {
   font-weight: 600;
 }
 
-/* 提供方卡片图标：simpleicons SVG 无固有尺寸，不约束会原尺寸撑爆卡片
+/* 提供方卡片图标：图标位图有固有尺寸，不约束会原尺寸撑爆卡片
    （真机走查实证的「超大图片突脸」）。 */
 .provider-card__icon {
   flex: none;
@@ -3226,4 +3226,32 @@ html,body,#app {
 }
 .settings-status--ok {
   color: #1a7f37;
+}
+
+/* 导入整合包弹窗（走查反馈②）：蓝色标题（红色是删除确认专用，避免误读为报错）*/
+.modpack-card__title {
+  margin: 0 0 2px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--color-primary);
+  color: var(--color-primary);
+  font-size: 16px;
+  font-weight: 700;
+}
+.modpack-flat__row {
+  padding: 3px 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  word-break: break-all;
+  line-height: 1.5;
+}
+.modpack-flat__row::before {
+  content: "· ";
+  color: var(--color-primary);
+  font-weight: 700;
+}
+.modpack-flat__more {
+  color: var(--color-text-secondary, #888);
+}
+.modpack-flat__more::before {
+  content: none;
 }

@@ -27,6 +27,7 @@ import {
 } from "../services/keyvault";
 import { fetchModels } from "../services/provider";
 import { keySaveEligible } from "../lib/vendor";
+import { providerIconPath } from "../lib/providerIcon";
 import { getSelectedInstance } from "../lib/selected-instance";
 import {
   addCustomProvider,
@@ -38,11 +39,6 @@ import {
 } from "../services/providers";
 
 const APP_VERSION = "0.1.0";
-
-/** simple-icons CDN（CC0）图标 URL；失败由 img onerror 回落字母块。 */
-function providerIconUrl(slug: string): string {
-  return `https://cdn.simpleicons.org/${slug}/1370F3`;
-}
 
 /** 提供方目录条目的统一展示素材（内置与自定义同构）。 */
 interface ProviderMeta {
@@ -192,7 +188,7 @@ function renderProviderCard(
       }
     })();
   });
-  const keyClear = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["清除"]);
+  const keyClear = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["清除"]);
   if (!vendor.hasKey) {
     keyClear.disabled = true;
     keyClear.title = vendor.envAuto ? "Key 来自环境变量，无法在此清除" : "尚无已存 Key";
@@ -216,7 +212,7 @@ function renderProviderCard(
 
   // ── 模型拉取（OpenAI 兼容 /models；Key 取自保险库）──
   const fetchedRow = el("div", { class: "provider-fetched" }, []);
-  const fetchBtn = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["从 API 拉取模型"]);
+  const fetchBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["从 API 拉取模型"]);
   fetchBtn.addEventListener("click", () => {
     void (async () => {
       fetchBtn.disabled = true;
@@ -306,7 +302,7 @@ function renderProviderCard(
   refreshAdded();
 
   if (meta.isCustom) {
-    const removeBtn = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["删除此自定义提供方"]);
+    const removeBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["删除此自定义提供方"]);
     removeBtn.addEventListener("click", (event) => {
       event.stopPropagation();
       void removeCustomProvider(meta.id)
@@ -320,7 +316,7 @@ function renderProviderCard(
   } else {
     // 内置提供方（按需添加式）：可从列表移除——整条记录（含已存 Key）清除，
     // 之后可在「从预设添加」重新加入。两击确认防误触。
-    const removeBtn = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["从列表移除"]);
+    const removeBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["从列表移除"]);
     let armed = false;
     let resetTimer: ReturnType<typeof setTimeout> | null = null;
     removeBtn.addEventListener("click", (event) => {
@@ -407,7 +403,7 @@ async function renderProvidersPane(pane: HTMLElement, pendingNote?: string): Pro
       label: entry.label,
       base: entry.base,
       style: entry.style,
-      iconUrl: entry.icon ? providerIconUrl(entry.icon) : undefined,
+      iconUrl: providerIconPath(entry.id),
       isCustom: false,
     });
   }
@@ -705,7 +701,7 @@ function openModalShell(title: string, bodyChildren: HTMLElement[]): { overlay: 
   overlay.addEventListener("click", (event) => {
     if (event.target === overlay) close();
   });
-  const cancel = el("button", { type: "button", class: "btn btn--muted" }, ["取消"]);
+  const cancel = el("button", { type: "button", class: "btn btn--line" }, ["取消"]);
   cancel.addEventListener("click", close);
   overlay.append(
     el("div", { class: "error-modal" }, [
@@ -1052,7 +1048,7 @@ async function renderMirrorPanel(card: HTMLElement): Promise<void> {
     })();
   });
 
-  const testBtn = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["测试此源连通性"]);
+  const testBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["测试此源连通性"]);
   testBtn.addEventListener("click", () => {
     void (async () => {
       testBtn.disabled = true;
@@ -1128,7 +1124,7 @@ async function renderCommunityMirrorPanel(card: HTMLElement): Promise<void> {
   });
 
   // 社区卡的「官方」探测点是 GitHub（版本卡的 official 是 npm+GitHub 双探测点）。
-  const testBtn = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["测试此源连通性"]);
+  const testBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["测试此源连通性"]);
   testBtn.addEventListener("click", () => {
     void (async () => {
       testBtn.disabled = true;
@@ -1185,8 +1181,8 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
         .then(() => {
           agentsStatus.textContent =
             text.trim() === ""
-              ? "已清除——各版本下次启动时回落为未设置。"
-              : "已保存——对全部版本的下次启动生效。";
+              ? "已清除——已从未自设的版本移除 AGENTS.md。"
+              : "已保存——对所有版本即时生效（运行中实例下一条消息起读取新内容）。";
         })
         .catch((err) => {
           agentsStatus.textContent = `保存失败：${String(err).slice(0, 240)}`;
@@ -1199,7 +1195,7 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
       agentsArea.value = global ?? "";
       agentsStatus.textContent =
         global == null
-          ? "当前未设置。对所有版本共享生效；单个版本可在「版本设置 → 设置」覆盖（覆盖后该版本不再使用全局）。"
+          ? "当前未设置。对所有版本共享生效。"
           : "已设置——修改即自动保存，对全部版本的下次启动生效。";
     } catch (err) {
       agentsStatus.textContent = `读取失败：${String(err).slice(0, 240)}`;
@@ -1211,7 +1207,7 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
     el("section", { class: "card settings-card" }, [
       el("h2", { class: "card__title" }, ["全局 AGENTS.md"]),
       el("p", { class: "settings-path" }, [
-        "对所有版本共享生效（启动时写入实例）；单个版本可在「版本设置 → 设置」覆盖——覆盖后该版本只用自己的内容，全局对它不再生效。",
+        "对所有版本共享生效（保存即物化到各版本）；单个版本可在「版本设置 → 设置」覆盖——覆盖后该版本只用自己的内容，全局对它不再生效。",
       ]),
       agentsArea,
       agentsStatus,
@@ -1314,7 +1310,7 @@ async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
       }
     })();
   });
-  const clearBtn = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["清除"]);
+  const clearBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["清除"]);
   if (!status.githubTokenConfigured) {
     clearBtn.disabled = true;
     clearBtn.title = status.githubTokenEnvAuto ? "Token 来自环境变量，无法在此清除" : "尚无已存 Token";
@@ -1377,7 +1373,7 @@ function renderHotkeysPane(pane: HTMLElement): void {
         }
         const combo = formatCombo(event);
         if (!hasPrimaryKey(combo)) {
-          capture.value = "需包含 Ctrl / Alt / Shift 或 F 键";
+          capture.value = "修饰键需搭配主键（如 Alt+1）——单独按下修饰键不生效";
           return;
         }
         saveBinding(binding.action, combo);
@@ -1396,7 +1392,7 @@ function renderHotkeysPane(pane: HTMLElement): void {
     }
   };
   refreshRows();
-  const resetBtn = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["恢复默认"]);
+  const resetBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["恢复默认"]);
   resetBtn.addEventListener("click", () => {
     resetBindings();
     refreshRows();

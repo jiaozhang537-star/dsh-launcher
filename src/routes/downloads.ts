@@ -187,7 +187,7 @@ function paintTaskCard(card: HTMLElement, task: DownloadTask): void {
       });
       actions.append(open);
     } else if (task.status === "running" && isSourceTask(task)) {
-      const cancel = el("button", { type: "button", class: "btn btn--muted settings-inline-btn" }, ["取消下载"]);
+      const cancel = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["取消下载"]);
       cancel.addEventListener("click", () => {
         void cancelSourceDownload();
         updateTask(task.instanceId, { detail: "正在取消…" });

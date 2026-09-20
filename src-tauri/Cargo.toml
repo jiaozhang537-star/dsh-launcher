@@ -41,3 +41,6 @@ windows = { version = "0.58", features = [
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
 ] }
+# 目录联接（junction）：skills 全局共享挂载（std 的 junction API 仍不稳定）。
+# MIT/Apache-2.0。
+junction = "1"

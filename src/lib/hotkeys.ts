@@ -69,8 +69,26 @@ export function resetBindings(): void {
   }
 }
 
-/** 键名规范化：可打印字符/功能键原样（字母大写），其余用 code 去掉前缀。 */
+/** 裸修饰键名（e.key 形态）：录制时按住单个修饰键不产生主键。 */
+const MODIFIER_KEYS = new Set<string>(["Control", "Alt", "Shift", "Meta"]);
+
+/** 尾段是否为修饰键：规范名（Ctrl/Control/Alt/Shift/Meta）+ 平台 code 形态
+ * （ControlLeft/AltRight 等）。keyName 把裸修饰键映射为规范名后，合成键盘
+ * 与真实键盘都会产出 "Ctrl+Control" 形态——规范名必须一并判为修饰键
+ * （2026-09-20 实机走查：只认 *Left/Right 时裸 Ctrl 录制即被存成主键）。 */
+function isModifierName(name: string): boolean {
+  return (
+    (MODIFIERS as readonly string[]).includes(name) ||
+    MODIFIER_KEYS.has(name) ||
+    /^(Ctrl|Control|Alt|Shift|Meta)(Left|Right)$/.test(name)
+  );
+}
+
+/** 键名规范化：可打印字符/功能键原样（字母大写），其余用 code 去掉前缀。
+ * 修饰键返回规范名（Ctrl/Alt/Shift/Meta）——裸按修饰键时 e.code 是
+ * AltLeft/ControlRight 之类平台形态，直用会把修饰键录成主键（审查 P2-06）。 */
 function keyName(e: KeyboardEvent): string {
+  if (MODIFIER_KEYS.has(e.key)) return e.key;
   if (/^F\d{1,2}$/.test(e.key)) return e.key;
   if (e.key.length === 1) return e.key.toUpperCase();
   return e.code.replace(/^Key|^Digit/, "") || e.key;
@@ -90,11 +108,12 @@ export function formatCombo(e: KeyboardEvent): string {
   return parts.join("+");
 }
 
-/** 组合是否含非修饰主键（如 "Ctrl+Alt" 这类无主键串不完整，不可保存/匹配）。 */
+/** 组合是否含非修饰主键（如 "Ctrl+Alt"、"Alt+AltLeft" 这类无主键串不完整，
+ * 不可保存/匹配）。 */
 export function hasPrimaryKey(combo: string): boolean {
   const parts = combo.split("+").filter((p) => p !== "");
   const last = parts[parts.length - 1];
-  return !!last && !(MODIFIERS as readonly string[]).includes(last);
+  return !!last && !isModifierName(last);
 }
 
 /** 事件是否命中组合串（修饰键精确匹配 + 主键键名一致）。 */

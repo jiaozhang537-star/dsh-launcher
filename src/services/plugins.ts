@@ -2,6 +2,14 @@
 
 export type PluginGroup = "builtin" | "thirdparty" | "selfmade";
 
+/** 组合包的子插件一行（父包 patch 的 insert 行；启停键是 rowId）。 */
+export interface ModpackChild {
+  name: string;
+  rowId: string;
+  version: string;
+  disabled: boolean;
+}
+
 export interface PluginRow {
   name: string;
   version: string;
@@ -11,6 +19,8 @@ export interface PluginRow {
   declaresPatch: boolean;
   group: PluginGroup;
   inBundles: boolean;
+  /** 组合包子插件（仅组合包口径命中的行携带；null = 非组合包）。 */
+  modpackChildren: ModpackChild[] | null;
   removable: boolean;
 }
 
@@ -72,6 +82,18 @@ export function pluginRemove(instanceId: string, name: string): Promise<void> {
  */
 export function pluginSetEnabled(instanceId: string, name: string, enabled: boolean): Promise<void> {
   return invoke<void>("plugin_set_enabled", { id: instanceId, name, enabled });
+}
+
+/**
+ * 组合包子插件启停：写版本用户层 cordis.patch.yml 的 `{id, disabled}` 覆盖
+ * （运行中实例经 DSH 热重载即时生效；未运行则下次启动生效）。
+ */
+export function pluginSetChildEnabled(
+  instanceId: string,
+  rowId: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("plugin_set_child_enabled", { id: instanceId, rowId, enabled });
 }
 
 /** 检查第三方插件更新（对比 npm dist-tags.latest；显式触发）。 */

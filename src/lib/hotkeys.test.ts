@@ -35,6 +35,21 @@ describe("formatCombo / hasPrimaryKey", () => {
     expect(hasPrimaryKey("Ctrl+Alt")).toBe(false);
     expect(hasPrimaryKey("")).toBe(false);
   });
+
+  it("裸修饰键不产生主键，平台 code 形态也判为修饰键（审查 P2-06）", () => {
+    // 真实事件：裸按 Alt 时 e.key="Alt"、e.code="AltLeft"——不得录成 Alt+AltLeft。
+    expect(formatCombo(keyEvent({ key: "Alt", code: "AltLeft", altKey: true }))).toBe("Alt+Alt");
+    expect(hasPrimaryKey("Alt+Alt")).toBe(false);
+    // 旧数据兜底：可能已存在的平台形态坏组合串一律判无主键。
+    expect(hasPrimaryKey("Alt+AltLeft")).toBe(false);
+    expect(hasPrimaryKey("Ctrl+ControlLeft")).toBe(false);
+    // 规范名形态（keyName 对裸修饰键的产物）："Ctrl+Control" 不得当主键。
+    expect(hasPrimaryKey("Ctrl+Control")).toBe(false);
+    expect(hasPrimaryKey("Alt+Alt")).toBe(false);
+    // 真组合不受影响：修饰键 + 主键照常录制与匹配。
+    expect(formatCombo(keyEvent({ key: "a", code: "KeyA", ctrlKey: true }))).toBe("Ctrl+A");
+    expect(hasPrimaryKey("Ctrl+A")).toBe(true);
+  });
 });
 
 describe("comboMatches", () => {

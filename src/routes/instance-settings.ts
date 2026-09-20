@@ -1,10 +1,12 @@
 import { el } from "../lib/dom";
-import { getSelectedInstance, getSelectedInstanceName } from "../lib/selected-instance";
+import { getSelectedInstance } from "../lib/selected-instance";
 import type { PageDefinition } from "../router";
 import {
   getInjectOverride,
   getGlobalAgentsMd,
   listInstances,
+  openInstanceSubdir,
+  renameInstance,
   setInjectOverride,
   type Instance,
 } from "../services/instances";
@@ -13,10 +15,16 @@ import {
   pluginCheckUpdates,
   pluginList,
   pluginRemove,
+  pluginSetChildEnabled,
   pluginSetEnabled,
   type PluginRow,
 } from "../services/plugins";
-import { downloadSourceArchive, openSourceDir } from "../services/sourceArchive";
+import {
+  deleteInstanceSources,
+  downloadSourceArchive,
+  instanceSourcesDownloaded,
+  openSourceDir,
+} from "../services/sourceArchive";
 
 /** 版本设置页（二级页）四分区。 */
 type SectionId = "overview" | "settings" | "plugins" | "export";
@@ -49,9 +57,6 @@ export const instanceSettingsPage: PageDefinition = {
   id: "instance-settings",
   navLabel: "版本设置",
   secondary: true,
-  // 标题同步求值：store 在选择发生时就带着名字（异步 init 只负责内容区），
-  // 避免「内容区已显示实例、顶栏仍写未选择实例」的不同步。
-  title: () => `版本设置 - ${getSelectedInstanceName() || "未选择实例"}`,
   render: () => {
     let currentInstance: Instance | null = null;
     let section: SectionId = "overview";
@@ -59,11 +64,15 @@ export const instanceSettingsPage: PageDefinition = {
     // ===== 左栏子导航 =====
     const navButtons = new Map<SectionId, HTMLButtonElement>();
     const rightArea = el("div", { class: "sub-right__content" }, []);
+    // AGENTS.md 防抖计时器提为 render 级：切分区时清除挂起的保存，避免旧
+    // 闭包在页面已重绘后照常写盘（写入目标本身正确，状态行已失效）。
+    let agentsSaveTimer: ReturnType<typeof setTimeout> | undefined;
 
     function renderSection(): void {
       for (const [id, btn] of navButtons) {
         btn.classList.toggle("sub-nav__item--active", id === section);
       }
+      clearTimeout(agentsSaveTimer);
       rightArea.replaceChildren();
       if (!currentInstance) {
         rightArea.append(el("p", { class: "settings-status" }, ["未选择实例——请先在「版本选择」页选择。"]));
@@ -78,33 +87,45 @@ export const instanceSettingsPage: PageDefinition = {
     // ===== 概览 =====
     function renderOverview(): void {
       const inst = currentInstance!;
+      const nameStatus = el("span", { class: "settings-path" }, []);
       rightArea.append(
-        el("section", { class: "card settings-card" }, [
-          el("h2", { class: "card__title" }, [inst.name]),
-          el("p", { class: "settings-path" }, [
-            `${inst.dshVersion ? `DSH ${inst.dshVersion}` : "未安装 DSH"} · profile: ${inst.profile}${
-              inst.port ? ` · 固定端口 :${inst.port}` : ""
-            }`,
-          ]),
-        ]),
+        // 概览首卡（实例名 + 版本/profile/端口 + 目录）按需求方 2026-09-20 判定
+        // 无用途删除：这些信息在「版本选择」页卡片上已有，本页只留操作。
         el("section", { class: "card settings-card" }, [
           el("h2", { class: "card__title" }, ["个性化"]),
           el("div", { class: "settings-field" }, [
             el("span", {}, ["实例名称"]),
-            el("div", { class: "settings-actions" }, [
-              (() => {
-                const input = el("input", { type: "text", class: "settings-input", value: inst.name });
-                input.disabled = true;
-                return input;
-              })(),
-              (() => {
-                const btn = el("button", { type: "button", class: "btn btn--muted" }, ["更改版本名"]);
+            el("div", { class: "settings-actions" }, (() => {
+              const input = el("input", { type: "text", class: "settings-input", value: inst.name }) as HTMLInputElement;
+              const btn = el("button", { type: "button", class: "btn btn--line" }, ["更改版本名"]);
+              btn.addEventListener("click", () => {
+                const newName = input.value.trim();
+                if (!newName) {
+                  nameStatus.textContent = "名称不能为空。";
+                  return;
+                }
+                if (newName === inst.name) {
+                  nameStatus.textContent = "名称未变化。";
+                  return;
+                }
                 btn.disabled = true;
-                btn.title = "Phase 5 交付";
-                return btn;
-              })(),
-            ]),
+                void renameInstance(inst.id, newName)
+                  .then(() => {
+                    inst.name = newName;
+                    nameStatus.textContent = "已改名。";
+                    renderSection();
+                  })
+                  .catch((err) => {
+                    nameStatus.textContent = `改名失败：${String(err).slice(0, 200)}`;
+                  })
+                  .finally(() => {
+                    btn.disabled = false;
+                  });
+              });
+              return [input, btn];
+            })()),
           ]),
+          nameStatus,
           el("div", { class: "settings-field" }, [
             el("span", {}, ["置顶（启动页排序置顶）"]),
             (() => {
@@ -116,8 +137,40 @@ export const instanceSettingsPage: PageDefinition = {
             })(),
           ]),
         ]),
+        renderQuickOpenCard(inst),
         renderSourcesCard(inst),
       );
+    }
+
+    /** 快捷打开卡（2026-09-12 追加批次）：横排三个按钮直达 skills / 对话 / 源码文件夹。 */
+    function renderQuickOpenCard(inst: Instance): HTMLElement {
+      const status = el("span", { class: "settings-path" }, ["在系统文件管理器中打开对应文件夹。"]);
+      const makeBtn = (label: string, which: "skills" | "sessions" | "sources"): HTMLElement => {
+        const btn = el("button", { type: "button", class: "btn btn--line" }, [label]);
+        btn.addEventListener("click", () => {
+          btn.disabled = true;
+          void openInstanceSubdir(inst.id, which)
+            .then(() => {
+              status.textContent = `已打开 ${label.replace(/^打开/, "")}文件夹。`;
+            })
+            .catch((err) => {
+              status.textContent = String(err).slice(0, 240);
+            })
+            .finally(() => {
+              btn.disabled = false;
+            });
+        });
+        return btn;
+      };
+      return el("section", { class: "card settings-card" }, [
+        el("h2", { class: "card__title" }, ["快捷打开"]),
+        el("div", { class: "settings-actions" }, [
+          makeBtn("打开skills", "skills"),
+          makeBtn("打开对话", "sessions"),
+          makeBtn("打开源码", "sources"),
+        ]),
+        status,
+      ]);
     }
 
     /** 源码归档卡片（FR-22 修订）：为该版本补下载官方源码到 `versions/<id>/sources/`。 */
@@ -138,12 +191,65 @@ export const instanceSettingsPage: PageDefinition = {
         });
       });
 
-      const btn = el("button", { type: "button", class: "btn btn--muted" }, ["下载源码"]);
+      // 删除源码（两击确认，同插件删除模式）：只删本版本 sources/ 目录。
+      const delBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["删除源码"]);
+      delBtn.hidden = true;
+      let delArmed = false;
+      let delTimer: ReturnType<typeof setTimeout> | undefined;
+      delBtn.addEventListener("click", () => {
+        if (!delArmed) {
+          delArmed = true;
+          delBtn.classList.add("btn--danger");
+          delBtn.textContent = "确认删除";
+          delTimer = setTimeout(() => {
+            delArmed = false;
+            delBtn.classList.remove("btn--danger");
+            delBtn.textContent = "删除源码";
+          }, 2500);
+          return;
+        }
+        clearTimeout(delTimer);
+        delArmed = false;
+        delBtn.classList.remove("btn--danger");
+        delBtn.textContent = "删除源码";
+        delBtn.disabled = true;
+        void deleteInstanceSources(inst.id)
+          .then(() => {
+            downloaded = false;
+            openBtn.hidden = true;
+            delBtn.hidden = true;
+            btn.disabled = !inst.dshVersion;
+            btn.textContent = "下载源码";
+            status.textContent = "源码归档已删除。";
+          })
+          .catch((err) => {
+            status.textContent = `删除失败：${String(err).slice(0, 240)}`;
+          })
+          .finally(() => {
+            delBtn.disabled = false;
+          });
+      });
+
+      const btn = el("button", { type: "button", class: "btn btn--line" }, ["下载源码"]);
       btn.disabled = !inst.dshVersion;
+      // 状态回显（走查反馈②）：已下载过就直接呈现「已下载 + 打开/删除」，
+      // 不再要点一次下载才知道。
+      void instanceSourcesDownloaded(inst.id)
+        .then((downloadedAlready) => {
+          if (!downloadedAlready || downloaded) return;
+          downloaded = true;
+          btn.disabled = true;
+          btn.textContent = "已下载";
+          openBtn.hidden = false;
+          delBtn.hidden = false;
+          status.textContent = "源码归档已在本版本 sources/ 目录，可打开查看。";
+        })
+        .catch(() => {});
       btn.addEventListener("click", () => {
         if (!inst.dshVersion || btn.disabled) return;
         btn.disabled = true;
         openBtn.hidden = true;
+        delBtn.hidden = true;
         status.textContent = "准备下载源码归档…";
         void downloadSourceArchive(inst.dshVersion, inst.id, ({ received, total }) => {
           if (total > 0) {
@@ -154,6 +260,7 @@ export const instanceSettingsPage: PageDefinition = {
             downloaded = true;
             status.textContent = "源码归档已就位 ✓（本版本 sources/ 目录，可打开查看）";
             openBtn.hidden = false;
+            delBtn.hidden = false;
           })
           .catch((err) => {
             status.textContent = `下载失败：${String(err).slice(0, 260)}`;
@@ -163,10 +270,10 @@ export const instanceSettingsPage: PageDefinition = {
             btn.textContent = downloaded ? "已下载" : "重试下载";
           });
       });
-      actions.append(btn, openBtn);
+      actions.append(btn, openBtn, delBtn);
       return el("section", { class: "card settings-card" }, [
         el("h2", { class: "card__title" }, ["源码归档"]),
-        el("div", { class: "settings-node-card" }, [btn, openBtn, status]),
+        el("div", { class: "settings-node-card" }, [btn, openBtn, delBtn, status]),
       ]);
     }
 
@@ -198,12 +305,11 @@ export const instanceSettingsPage: PageDefinition = {
       agentsArea.placeholder = "为这个版本单独填写指令；留空 = 恢复继承全局默认";
       const agentsStatus = el("p", { class: "settings-path" }, ["加载中…"]);
       let agentsLoaded = false;
-      let agentsTimer: ReturnType<typeof setTimeout> | undefined;
       agentsArea.addEventListener("input", () => {
         if (!agentsLoaded) return;
-        clearTimeout(agentsTimer);
+        clearTimeout(agentsSaveTimer);
         agentsStatus.textContent = "正在保存…";
-        agentsTimer = setTimeout(() => {
+        agentsSaveTimer = setTimeout(() => {
           void (async () => {
             try {
               const over = await getInjectOverride(inst.id);
@@ -215,8 +321,8 @@ export const instanceSettingsPage: PageDefinition = {
               });
               agentsStatus.textContent =
                 text.trim() === ""
-                  ? "已恢复继承全局默认——启动该版本时物化生效。"
-                  : "已保存——启动该版本时生效（该版本只用自己的内容，全局对它不再生效）。";
+                  ? "已恢复继承全局默认——已即时物化到本版本。"
+                  : "已保存并即时物化——运行中实例下一条消息起生效（该版本只用自己的内容，全局对它不再生效）。";
             } catch (err) {
               agentsStatus.textContent = `保存失败：${String(err).slice(0, 240)}`;
             }
@@ -230,9 +336,9 @@ export const instanceSettingsPage: PageDefinition = {
           agentsArea.value = own ?? global ?? "";
           agentsStatus.textContent =
             own != null
-              ? "当前：实例独立内容——该版本只用自己的内容（覆盖全局，非叠加）；启动时生效。"
+              ? "当前：实例独立内容——覆盖全局（非叠加）；修改即保存并即时物化。"
               : global
-                ? "当前：继承全局默认——启动该版本时物化生效；修改即转为实例独立内容。"
+                ? "当前：继承全局默认——修改即转为实例独立内容并即时物化。"
                 : "当前：全局与实例均未设置。";
         } catch (err) {
           agentsStatus.textContent = `读取失败：${String(err).slice(0, 240)}`;
@@ -284,7 +390,7 @@ export const instanceSettingsPage: PageDefinition = {
       // 「重新扫描」（R7-4）：插件清单每次渲染都重新读盘，但已渲染的节不自动刷新——
       // 网页里 `dsh plugin add` 装上的插件、或从别处复制进来的自建插件，需要用户
       // 主动重扫一次才出现在这一节（真机走查见 2026-09-12 QA 报告 Q4）。
-      const rescan = el("button", { type: "button", class: "btn btn--muted" }, ["重新扫描"]);
+      const rescan = el("button", { type: "button", class: "btn btn--line" }, ["重新扫描"]);
       rescan.title = "重新读取该实例 profile 的插件清单（不会启动实例）";
       rescan.addEventListener("click", () => {
         rescan.disabled = true;
@@ -379,8 +485,52 @@ export const instanceSettingsPage: PageDefinition = {
         return row;
       }
 
-      function rowUpdate(u: { name: string; current: string; latest: string; updatable: boolean }): HTMLElement {
-        const badge = u.updatable
+      /** 组合包卡片（2026-09-12 追加批次）：每个组合包一张折叠卡（位于自建组
+       * 之上），展开列出父包 patch insert 的子插件，各自可启停——启停写版本
+       * 用户层 cordis.patch.yml（{id,disabled}），运行中实例经 DSH 热重载即时
+       * 生效；未运行则下次启动生效。 */
+      function modpackRows(plugins: PluginRow[]): [PluginRow, HTMLElement][] {
+        const out: [PluginRow, HTMLElement][] = [];
+        for (const p of plugins) {
+          const kids = p.modpackChildren;
+          if (!kids || kids.length === 0) continue;
+          const rows = kids.map((c) => {
+            const box = el("input", { type: "checkbox", class: "plugin-row__enable" }) as HTMLInputElement;
+            box.checked = !c.disabled;
+            box.title = c.disabled
+              ? "已停用——勾选 = 启用（运行中实例热重载即时生效；未运行则下次启动生效）"
+              : "已启用——取消勾选 = 停用（运行中实例热重载即时生效；未运行则下次启动生效）";
+            box.addEventListener("change", () => {
+              box.disabled = true;
+              setStatus(`正在${box.checked ? "启用" : "停用"} ${c.name}…`);
+              void pluginSetChildEnabled(inst.id, c.rowId, box.checked)
+                .then(() => {
+                  setStatus(
+                    `${box.checked ? "已启用" : "已停用"} ${c.name}——运行中实例热重载即时生效，未运行则下次启动生效。`,
+                  );
+                  void load();
+                })
+                .catch((err) => {
+                  box.disabled = false;
+                  box.checked = !box.checked;
+                  setStatus(`操作失败：${String(err).slice(0, 240)}`, true);
+                });
+            });
+            return el("div", { class: "ver-row plugin-row" }, [
+              box,
+              el("span", { class: "ver-row__main" }, [c.name]),
+              el("span", { class: "ver-row__sub" }, [c.version ? `v${c.version}` : "未知版本"]),
+            ]);
+          });
+          out.push([
+            p,
+            collapsibleGroup(`组合包：${p.name}`, kids.length, false, rows),
+          ]);
+        }
+        return out;
+      }
+
+      function rowUpdate(u: { name: string; current: string; latest: string; updatable: boolean }): HTMLElement {        const badge = u.updatable
           ? el("span", { class: "mk-badge mk-badge--latest" }, [`可更新 → ${u.latest}`])
           : el("span", { class: "mk-badge" }, ["已是最新"]);
         return el("div", { class: "ver-row plugin-row" }, [
@@ -414,11 +564,15 @@ export const instanceSettingsPage: PageDefinition = {
                 "这一节每次进入都重新读盘（读该 profile 的清单），所以在网页会话里跑 `dsh plugin add` 装上的插件，" +
                 "点「重新扫描」即可看到；插件本身仍要下次启动该实例才加载。清单里没有记录的包（例如手放进 node_modules 的）不在此列。",
             );
-            listArea.append(
-              collapsibleGroup("dsh 内置", builtin.length, true, builtin),
-              collapsibleGroup("第三方插件", third.length, false, third),
-              collapsibleGroup("自建插件", self.length, true, self),
-            );
+            const modpacks = modpackRows(list.plugins);
+            // 空组不出卡：删掉组内最后一个插件后，0 条的折叠组仍渲染标题行 +
+            // 空列表，展开就是一片残影卡（真机走查 2026-09-20）。
+            const groups: HTMLElement[] = [];
+            if (builtin.length > 0) groups.push(collapsibleGroup("dsh 内置", builtin.length, true, builtin));
+            if (third.length > 0) groups.push(collapsibleGroup("第三方插件", third.length, false, third));
+            groups.push(...modpacks.map(([, group]) => group));
+            if (self.length > 0) groups.push(collapsibleGroup("自建插件", self.length, true, self));
+            listArea.append(...groups);
           } else {
             const updates = (await pluginCheckUpdates(inst.id)).filter((u) => u.updatable);
             listArea.replaceChildren();

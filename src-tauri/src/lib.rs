@@ -36,6 +36,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             instance_list,
             instance_create,
+            instance_register_external,
+            instance_open_subdir,
             instance_delete,
             instance_get,
             instance_update,
@@ -62,6 +64,8 @@ pub fn run() {
             source_download,
             source_download_cancel,
             source_open_dir,
+            source_delete,
+            source_status,
             keyvault_status,
             keyvault_set_enabled,
             keyvault_set_key,
@@ -91,6 +95,7 @@ pub fn run() {
             plugin_remove,
             plugin_check_updates,
             plugin_set_enabled,
+            plugin_set_child_enabled,
     skill_feed,
     skill_install,
     modpack_feed,
@@ -193,7 +198,34 @@ fn instance_create(name: String, profile: String) -> Result<instances::InstanceV
     let instance =
         instances::create_instance(&name, &profile).map(|i| instances::InstanceView::from(&i))?;
     llm_bridge::sync_instance(&instance.id)?;
+    instances::ensure_skills_link(&instance.id)?;
     Ok(instance)
+}
+
+/// 「添加已有文件夹」：把既有 DSH 实例目录原地注册为实例（数据留在原地，
+/// 删除 = 仅解除关联）。注册后立即桥接当前启用的模型路由。
+#[tauri::command]
+fn instance_register_external(folder: String) -> Result<instances::InstanceView, String> {
+    let instance = instances::register_external(&folder)
+        .map(|i| instances::InstanceView::from(&i))?;
+    llm_bridge::sync_instance(&instance.id)?;
+    // 外部实例不共享 skills（2026-09-20 需求方裁决方案 A）：不动用户文件夹的
+    // 技能数据、不建联接；共享挂载仅托管实例。
+    if instance.dir.is_none() {
+        instances::ensure_skills_link(&instance.id)?;
+    }
+    Ok(instance)
+}
+
+/// 在文件管理器中打开实例子目录（skills / sessions / sources）。
+#[tauri::command]
+fn instance_open_subdir(
+    app: tauri::AppHandle,
+    id: String,
+    which: String,
+) -> Result<String, String> {
+    instances::open_subdir(&app, &id, &which)
+        .map(|dir| dir.display().to_string())
 }
 
 /// 删除实例（整目录移除，零残留）。
@@ -400,6 +432,18 @@ fn source_open_dir(
     instance_id: Option<String>,
 ) -> Result<(), String> {
     source_archive::open_dir(&app, &version, instance_id.as_deref())
+}
+
+/// 删除版本内的源码归档目录（不存在时幂等成功）。
+#[tauri::command]
+fn source_delete(instance_id: String) -> Result<(), String> {
+    source_archive::delete_instance_sources(&instance_id)
+}
+
+/// 版本内源码归档是否已下载（卡片状态回显）。
+#[tauri::command]
+fn source_status(instance_id: String) -> Result<bool, String> {
+    source_archive::instance_sources_downloaded(&instance_id)
 }
 
 /// 保险库状态（只读视图；无密钥材料）。多厂商形态：每厂商一条
@@ -667,6 +711,9 @@ async fn instance_launch(
         },
     };
     ensure_not_cancelled(&id)?;
+    emit_launch_progress(&app, &id, 55, "正在挂载全局技能目录…");
+    instances::ensure_skills_link(&id)?;
+    ensure_not_cancelled(&id)?;
     emit_launch_progress(&app, &id, 55, "正在同步模型配置…");
     if state.running {
         emit_launch_progress(&app, &id, 64, "实例正在运行，正在重启实例…");
@@ -834,6 +881,13 @@ async fn plugin_check_updates(id: String) -> Result<Vec<plugin_manage::PluginUpd
 #[tauri::command]
 fn plugin_set_enabled(id: String, name: String, enabled: bool) -> Result<(), String> {
     plugin_manage::set_enabled(&id, &name, enabled)
+}
+
+/// 组合包子插件启停（写版本用户层 cordis.patch.yml 的 `{id, disabled}` 覆盖；
+/// 运行中实例经 DSH 热重载即时生效，未运行则下次启动生效）。
+#[tauri::command]
+fn plugin_set_child_enabled(id: String, row_id: String, enabled: bool) -> Result<(), String> {
+    plugin_manage::set_child_enabled(&id, &row_id, enabled)
 }
 
 /// Skill 中心信息流（GitHub `dsh-skill` 聚合 + 离线快照降级；FR-14）。

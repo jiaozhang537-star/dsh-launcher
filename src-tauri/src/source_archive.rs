@@ -64,6 +64,22 @@ pub fn instance_sources_dir(instance_id: &str) -> Result<PathBuf, String> {
     Ok(crate::instances::instance_dir(instance_id)?.join("sources"))
 }
 
+/// 版本内源码归档是否已下载（版本设置页卡片的状态回显）。
+pub fn instance_sources_downloaded(instance_id: &str) -> Result<bool, String> {
+    crate::instances::get_instance(instance_id)?;
+    Ok(instance_sources_dir(instance_id)?.is_dir())
+}
+
+/// 删除版本内的源码归档目录（不存在时幂等成功；只动 sources/，不碰实例其余内容）。
+pub fn delete_instance_sources(instance_id: &str) -> Result<(), String> {
+    crate::instances::get_instance(instance_id)?;
+    let dir = instance_sources_dir(instance_id)?;
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("删除源码目录失败：{e}"))?;
+    }
+    Ok(())
+}
+
 /// 下载并解压指定版本的源码归档（阻塞调用——command 侧放 spawn_blocking）。
 /// `instance_id` = Some 时落版本目录（已存在即报错，不覆盖）；None 时落全局
 /// `sources/<tag>/`（重名自动加副本后缀）。成功返回解压后的源码目录；
@@ -156,17 +172,46 @@ fn extract_zip_to(zip_path: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 「打开全局源码」的落点解析：优先 `<tag>` 原名；缺失时取 `<tag>-副本N` 中
+/// 编号最大的一份（多次下载同一 tag 时打开最新副本，审查 P3-06）。
+fn resolve_open_global_dir(tag: &str) -> Result<PathBuf, String> {
+    let root = paths::sources_dir()?;
+    let first = root.join(tag);
+    if first.is_dir() {
+        return Ok(first);
+    }
+    let prefix = format!("{tag}-副本");
+    let mut best: Option<(u32, PathBuf)> = None;
+    // sources/ 根尚不存在（全新安装未下载过任何源码）= 无副本可找，
+    // 落到统一的「不存在」可读报错，而非裸 IO 错误。
+    if root.is_dir() {
+        let entries = std::fs::read_dir(&root)
+            .map_err(|e| format!("读取 {} 失败：{e}", root.display()))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(n) = name.strip_prefix(&prefix) {
+                let Ok(n) = n.parse::<u32>() else { continue };
+                if best.as_ref().map_or(true, |(b, _)| n > *b) {
+                    best = Some((n, entry.path()));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+        .ok_or_else(|| format!("源码目录不存在（尚未下载或已被删除）：{}", first.display()))
+}
+
 /// 在系统文件管理器中打开已解压的源码目录（目录不存在时报错）。
-/// `instance_id` = Some 时开版本内 `sources/`，None 时开全局 `<tag>/`。
+/// `instance_id` = Some 时开版本内 `sources/`，None 时开全局 `<tag>/`（或其最新副本）。
 pub fn open_dir(app: &tauri::AppHandle, version: &str, instance_id: Option<&str>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let _tag = dsh_source_tag(version)?;
+    let tag = dsh_source_tag(version)?;
     let dir = match instance_id {
         Some(id) => {
             crate::instances::get_instance(id)?;
             instance_sources_dir(id)?
         }
-        None => paths::sources_dir()?.join(dsh_source_tag(version)?),
+        None => resolve_open_global_dir(&tag)?,
     };
     if !dir.is_dir() {
         return Err(format!("源码目录不存在（尚未下载或已被删除）：{}", dir.display()));
@@ -250,6 +295,31 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         let third = resolve_global_dir(&tag).unwrap();
         assert_eq!(third.file_name().unwrap().to_string_lossy(), format!("{tag}-副本3"));
+    }
+
+    /// 「打开全局源码」认副本：`<tag>` 缺失时取编号最大的 `-副本N`（审查 P3-06）。
+    #[test]
+    fn open_global_dir_resolves_latest_copy_suffix() {
+        let (_lock, _tmp) = crate::instances::tests::sandbox("source-open-copy");
+        let tag = dsh_source_tag("0.1.1-rc.2").unwrap();
+        let root = paths::sources_dir().unwrap();
+
+        // 无任何目录 → 可读报错。
+        let err = resolve_open_global_dir(&tag).unwrap_err();
+        assert!(err.contains("不存在"), "实际：{err}");
+
+        // 原名存在 → 原名优先。
+        std::fs::create_dir_all(root.join(&tag)).unwrap();
+        assert_eq!(resolve_open_global_dir(&tag).unwrap(), root.join(&tag));
+
+        // 原名缺失、副本 2/3 并存 → 取编号最大（打开最新一份）。
+        std::fs::remove_dir_all(root.join(&tag)).unwrap();
+        std::fs::create_dir_all(root.join(format!("{tag}-副本2"))).unwrap();
+        std::fs::create_dir_all(root.join(format!("{tag}-副本3"))).unwrap();
+        assert_eq!(
+            resolve_open_global_dir(&tag).unwrap(),
+            root.join(format!("{tag}-副本3"))
+        );
     }
 
     /// 版本内落点：目录存在（= 已下载过）即拒绝，fail loud 不覆盖。

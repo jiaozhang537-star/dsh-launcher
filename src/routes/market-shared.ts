@@ -62,7 +62,7 @@ export function openInstanceChooser(opts: ChooserOptions): void {
     body,
     el("div", { class: "error-modal__btns" }, [
       (() => {
-        const btn = el("button", { type: "button", class: "btn btn--muted" }, ["取消"]);
+        const btn = el("button", { type: "button", class: "btn btn--line" }, ["取消"]);
         btn.addEventListener("click", close);
         return btn;
       })(),

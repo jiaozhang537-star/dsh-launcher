@@ -4,7 +4,13 @@ import { dropFavorite, isFavorite, loadFavorites, toggleFavorite } from "../lib/
 import { getSelectedInstance, setSelectedInstance } from "../lib/selected-instance";
 import type { PageDefinition } from "../router";
 import { navigate } from "../router";
-import { deleteInstance, listInstances, type Instance } from "../services/instances";
+import {
+  deleteInstance,
+  listInstances,
+  pickFolder,
+  registerExternalInstance,
+  type Instance,
+} from "../services/instances";
 import { openModpackImport } from "./modpack-import";
 
 /** 版本行内右侧悬浮操作：收藏（♥）/ 删除（垃圾桶）/ 设置（齿轮）。 */
@@ -28,7 +34,6 @@ export const instanceSelectPage: PageDefinition = {
   id: "instance-select",
   navLabel: "版本选择",
   secondary: true,
-  title: () => "版本选择",
   render: () => {
     let instances: Instance[] = [];
     let currentId: string | null = getSelectedInstance();
@@ -48,9 +53,24 @@ export const instanceSelectPage: PageDefinition = {
 
     const addFolderBtn = el(
       "button",
-      { type: "button", class: "sub-left__action", disabled: "", title: "后续阶段交付" },
+      { type: "button", class: "sub-left__action", title: "选择一个实例文件夹原地注册（数据留在原地；需含 instance.json 或已安装 DSH 本体）" },
       ["⊕ 添加已有文件夹"],
     );
+    addFolderBtn.addEventListener("click", () => {
+      void (async () => {
+        try {
+          const folder = await pickFolder();
+          if (!folder) return;
+          note("正在注册文件夹…");
+          const inst = await registerExternalInstance(folder);
+          instances = await listInstances().catch(() => instances);
+          renderRight();
+          note(`已添加 ${inst.name}（原目录：${inst.dir ?? folder}）`);
+        } catch (err) {
+          note(`添加失败：${String(err).slice(0, 260)}`, true);
+        }
+      })();
+    });
     const importPackBtn = el(
       "button",
       { type: "button", class: "sub-left__action", title: "选择整合包 tgz 文件导入（也可以直接拖进窗口任意位置）" },
@@ -87,7 +107,7 @@ export const instanceSelectPage: PageDefinition = {
 
     function selectAndBack(inst: Instance): void {
       currentId = inst.id;
-      setSelectedInstance(inst.id, inst.name);
+      setSelectedInstance(inst.id);
       navigate("launch");
     }
 
@@ -104,7 +124,7 @@ export const instanceSelectPage: PageDefinition = {
           instances = instances.filter((i) => i.id !== target.id);
           const next = sortInstancesByRecency(instances)[0];
           currentId = next?.id ?? null;
-          if (next) setSelectedInstance(next.id, next.name);
+          if (next) setSelectedInstance(next.id);
           else setSelectedInstance(null);
         }
         instances = await listInstances().catch(() => instances.filter((i) => i.id !== target.id));
@@ -118,11 +138,17 @@ export const instanceSelectPage: PageDefinition = {
     function renderConfirmCard(): void {
       confirmOverlay.hidden = !confirmTarget;
       if (confirmTarget) {
+        // 外部实例（原地引用）：删除 = 仅解除关联，绝不删用户文件夹。
         confirmBody.replaceChildren(
           el("p", { class: "confirm-card__line" }, [
             `你确定要删除版本 `,
             el("strong", {}, [confirmTarget.name]),
-            ` 吗？插件、Skill 将会一并删除。`,
+            ` 吗？`,
+          ]),
+          el("p", { class: "confirm-card__line" }, [
+            confirmTarget.dir
+              ? "该版本来自外部文件夹：仅解除与启动器的关联，文件夹与其中的数据不会被删除。"
+              : "插件、Skill 将会一并删除。",
           ]),
         );
       }
@@ -179,7 +205,7 @@ export const instanceSelectPage: PageDefinition = {
       setBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         currentId = inst.id;
-        setSelectedInstance(inst.id, inst.name);
+        setSelectedInstance(inst.id);
         navigate("instance-settings");
       });
 
@@ -232,7 +258,7 @@ export const instanceSelectPage: PageDefinition = {
           const sorted = sortInstancesByRecency(instances);
           const first = sorted[0] ?? instances[0];
           currentId = first?.id ?? null;
-          if (first) setSelectedInstance(first.id, first.name);
+          if (first) setSelectedInstance(first.id);
         }
       } catch (err) {
         console.error("版本选择页初始化失败", err);
@@ -260,7 +286,7 @@ export const instanceSelectPage: PageDefinition = {
 
     // ===== 删除确认卡（PCL2 式：红标题 + 说明 + 确定/取消）=====
     const confirmBody = el("div", { class: "confirm-card__body" }, []);
-    const confirmCancel = el("button", { type: "button", class: "btn btn--muted" }, ["取消"]);
+    const confirmCancel = el("button", { type: "button", class: "btn btn--line" }, ["取消"]);
     confirmCancel.addEventListener("click", () => {
       confirmTarget = null;
       renderConfirmCard();

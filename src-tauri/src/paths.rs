@@ -70,6 +70,12 @@ pub fn shared_dir() -> Result<PathBuf, String> {
     Ok(managed_root()?.join(SHARED_DIR))
 }
 
+/// 全局共享技能目录：`<managed root>/shared/skills`（2026-09-12 需求变更：
+/// skills 不随实例隔离，所有版本共享一份；实例内为指向此处的目录联接）。
+pub fn shared_skills_dir() -> Result<PathBuf, String> {
+    Ok(shared_dir()?.join("skills"))
+}
+
 /// 解析全局 AGENTS.md：`<managed root>/AGENTS.md`（设置页输入框落点）。
 pub fn global_agents_md_file() -> Result<PathBuf, String> {
     Ok(managed_root()?.join(AGENTS_MD_FILE))

@@ -1120,6 +1120,7 @@ mod tests {
                 last_launched_at: None,
                 port: Some(port),
                 created_at: "2026-09-08T00:00:00Z".into(),
+                            dir: None,
             }],
         };
         instances::save_registry(&registry).unwrap();
