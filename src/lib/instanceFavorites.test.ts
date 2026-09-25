@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { dropFavorite, isFavorite, loadFavorites, toggleFavorite } from "./instanceFavorites";
 
-/** 内存版 Storage（node 测试环境无 localStorage，同 hotkeys 注入范式）。 */
+/** 内存版 Storage（node 测试环境无 localStorage，store 注入范式）。 */
 function memStore(): Storage {
   const map = new Map<string, string>();
   return {

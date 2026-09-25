@@ -666,9 +666,9 @@ export const instanceSettingsPage: PageDefinition = {
         pluginListArea,
         el("h2", { class: "card__title" }, ["设置内容"]),
         el("p", { class: "settings-path" }, [
-          "提供商不含 API Key；热键导入后作用于启动器全局；注入配置与环境变量永不入包。",
+          "提供商不含 API Key；注入配置与环境变量永不入包。",
         ]),
-        ...["模型提供商", "热键", "注入配置", "AGENTS.md"].map((label) => {
+        ...["模型提供商", "注入配置", "AGENTS.md"].map((label) => {
           const box = el("input", { type: "checkbox" }) as HTMLInputElement;
           settingChecks.push({ box, label });
           return el("label", { class: "modpack-radio" }, [box, el("span", {}, [label])]);
@@ -691,10 +691,9 @@ export const instanceSettingsPage: PageDefinition = {
           return;
         }
         const includeVendors = settingChecks[0].box.checked;
-        const includeHotkeys = settingChecks[1].box.checked;
-        const includeInject = settingChecks[2].box.checked;
-        const includeAgentsMd = settingChecks[3].box.checked;
-        if (chosenPlugins === 0 && !includeVendors && !includeHotkeys && !includeInject && !includeAgentsMd) {
+        const includeInject = settingChecks[1].box.checked;
+        const includeAgentsMd = settingChecks[2].box.checked;
+        if (chosenPlugins === 0 && !includeVendors && !includeInject && !includeAgentsMd) {
           status.textContent = "请至少勾选一个插件或一项设置内容。";
           return;
         }
@@ -713,7 +712,6 @@ export const instanceSettingsPage: PageDefinition = {
                   pluginListArea.querySelectorAll<HTMLInputElement>("input[type=checkbox]:checked"),
                 ).map((box) => box.dataset.name ?? ""),
                 includeVendors,
-                includeHotkeys,
                 includeInject,
                 includeAgentsMd,
               },

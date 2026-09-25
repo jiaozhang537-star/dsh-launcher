@@ -19,7 +19,6 @@ export interface ModpackManifest {
       name: string | null;
       style: string | null;
     }[];
-    hotkeys: Record<string, string>;
     injectSettings: Record<string, unknown>;
     agentsMd: { global: string | null; instance: string | null } | null;
   } | null;
@@ -31,7 +30,6 @@ export interface ModpackExportOptions {
   name: string;
   plugins: string[];
   includeVendors: boolean;
-  includeHotkeys: boolean;
   includeInject: boolean;
   includeAgentsMd: boolean;
 }

@@ -40,7 +40,6 @@ function settingsManifest() {
     plugins: [],
     settings: {
       vendors: [],
-      hotkeys: {},
       injectSettings: { "llm-deepseek": { thinking: "disabled" } },
       agentsMd: null,
     },

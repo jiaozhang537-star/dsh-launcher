@@ -24,9 +24,6 @@ pub const SHARED_DIR: &str = "shared";
 /// 全局 AGENTS.md 文件名（位于托管根下；版本内的落版本目录，DSH 原生读取位）。
 pub const AGENTS_MD_FILE: &str = "AGENTS.md";
 
-/// 热键绑定文件名（位于托管根下；2026-09-12 起取代前端 localStorage）。
-pub const HOTKEYS_FILE: &str = "hotkeys.json";
-
 /// 实例注册表文件名（位于托管根下；文件名沿用旧称，指向 VERSIONS_DIR）。
 pub const INSTANCES_FILE: &str = "instances.json";
 
@@ -79,11 +76,6 @@ pub fn shared_skills_dir() -> Result<PathBuf, String> {
 /// 解析全局 AGENTS.md：`<managed root>/AGENTS.md`（设置页输入框落点）。
 pub fn global_agents_md_file() -> Result<PathBuf, String> {
     Ok(managed_root()?.join(AGENTS_MD_FILE))
-}
-
-/// 解析热键绑定文件：`<managed root>/hotkeys.json`。
-pub fn hotkeys_file() -> Result<PathBuf, String> {
-    Ok(managed_root()?.join(HOTKEYS_FILE))
 }
 
 /// 解析实例注册表文件：`<managed root>/instances.json`。
@@ -241,7 +233,6 @@ mod tests {
             global_agents_md_file().unwrap(),
             root.join("AGENTS.md")
         );
-        assert_eq!(hotkeys_file().unwrap(), root.join("hotkeys.json"));
         assert_eq!(instances_file().unwrap(), root.join("instances.json"));
         assert_eq!(market_cache_file().unwrap(), root.join("market-cache.json"));
 

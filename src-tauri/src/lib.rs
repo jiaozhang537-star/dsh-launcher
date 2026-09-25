@@ -2,7 +2,6 @@
 mod dsh_install;
 mod gateway;
 mod github;
-mod hotkey_store;
 mod inject;
 mod instances;
 mod keyvault;
@@ -56,8 +55,6 @@ pub fn run() {
             inject_default_set,
             inject_agents_global_get,
             inject_agents_global_set,
-            hotkeys_get,
-            hotkeys_set,
             mirror_get,
             mirror_set,
             mirror_test,
@@ -316,18 +313,6 @@ fn inject_agents_global_get() -> Result<Option<String>, String> {
 #[tauri::command]
 fn inject_agents_global_set(content: Option<String>) -> Result<(), String> {
     inject::set_global_agents_md(content.as_deref())
-}
-
-/// 读热键覆盖表（hotkeys.json；随数据目录走，缺省 = 全部默认键）。
-#[tauri::command]
-fn hotkeys_get() -> Result<std::collections::BTreeMap<String, String>, String> {
-    hotkey_store::load()
-}
-
-/// 保存热键覆盖表（整体替换；空表 = 全部回默认键）。
-#[tauri::command]
-fn hotkeys_set(overrides: std::collections::BTreeMap<String, String>) -> Result<(), String> {
-    hotkey_store::save(&overrides)
 }
 
 /// 读镜像源设置与内置源清单（版本通道 + 社区资源通道，FR-18 修订后结构）。

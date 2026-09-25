@@ -7,9 +7,7 @@ import { settingsPage } from "./routes/settings";
 import { morePage } from "./routes/more";
 import { instanceSelectPage } from "./routes/instance-select";
 import { instanceSettingsPage } from "./routes/instance-settings";
-import { mountRouter, navigate, registerPages } from "./router";
-import { comboMatches, HOTKEY_ACTIONS, isTypingTarget, loadBindings } from "./lib/hotkeys";
-import { hydrateHotkeys } from "./services/hotkeys";
+import { mountRouter, registerPages } from "./router";
 
 registerPages([launchPage, downloadsPage, settingsPage, morePage, instanceSelectPage, instanceSettingsPage]);
 
@@ -26,9 +24,6 @@ main.className = "app-main";
 root.append(main);
 
 mountRouter(main);
-
-// 热键覆盖从 hotkeys.json 水合（随数据目录走，FILE-LAYOUT）；失败降级为默认键。
-void hydrateHotkeys();
 
 // 窗口已关闭 Tauri 原生拖放（dragDropEnabled=false，否则 WebView2 会吞掉
 // 页面内的 HTML5 拖拽——提供方卡片拖拽排序实测失效）。此处全局拦截
@@ -60,18 +55,4 @@ window.addEventListener("drop", (event) => {
       alert(`拖入导入失败：${String(err).slice(0, 240)}`);
     }
   })();
-});
-
-// 应用内快捷键（热键页可视化配置）：输入类控件聚焦时不触发。
-window.addEventListener("keydown", (event) => {
-  if (isTypingTarget(event.target)) return;
-  for (const binding of loadBindings()) {
-    if (!comboMatches(event, binding.combo)) continue;
-    const target = HOTKEY_ACTIONS.find((action) => action.id === binding.action)?.target;
-    if (target) {
-      event.preventDefault();
-      navigate(target);
-    }
-    return;
-  }
 });

@@ -43,7 +43,6 @@ function buildPreview(manifest: ModpackManifest): { summary: HTMLElement; sectio
   if (manifest.plugins.length > 0) stats.push(`${manifest.plugins.length} 个插件`);
   if (manifest.settings) {
     if (manifest.settings.vendors.length > 0) stats.push(`提供商 ${manifest.settings.vendors.length}`);
-    if (Object.keys(manifest.settings.hotkeys).length > 0) stats.push("热键");
     if (Object.keys(manifest.settings.injectSettings).length > 0) stats.push("注入配置");
     if (manifest.settings.agentsMd) stats.push("AGENTS.md");
   }
@@ -192,7 +191,7 @@ export async function openModpackImport(filePath: string | null): Promise<void> 
       globalLabel,
       instanceLabel,
       el("p", { class: "settings-path" }, [
-        "热键始终作用于启动器全局；提供商不含 API Key（导入后需自行填写）；AGENTS.md 保存即生效。",
+        "提供商不含 API Key（导入后需自行填写）；AGENTS.md 保存即生效。",
       ]),
     );
   }
@@ -241,17 +240,6 @@ export async function openModpackImport(filePath: string | null): Promise<void> 
         status.classList.add("settings-status--ok");
         status.textContent = lines.length > 0 ? lines.join("\n") : "导入完成（包内没有可安装内容）。";
         status.classList.add("modpack-report");
-        // 导入带热键时同步水合前端缓存（否则热键页要重启应用才见新值）。
-        if (report.applied.some((a) => a.includes("热键"))) {
-          void (async () => {
-            try {
-              const { hydrateHotkeys } = await import("../services/hotkeys");
-              await hydrateHotkeys();
-            } catch {
-              // 水合失败不阻塞：旧缓存继续用，重启后自然生效。
-            }
-          })();
-        }
         okBtn.textContent = "完成";
         okBtn.disabled = false;
         okBtn.removeEventListener("click", close);

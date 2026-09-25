@@ -7,8 +7,9 @@
 //!
 //! 安全与隐私边界（FILE-LAYOUT 入包口径）：Key 密文、环境变量（env）、
 //! 对话列表（sessions）**没有对应的 manifest 字段**——结构上就装不进去。
-
-use std::collections::BTreeMap;
+//!
+//! 2026-09-25（Phase 4.5 F 项）：设置包 hotkeys 节随启动器热键功能整体移除；
+//! P4 时期旧包 manifest 里的 `hotkeys` 字段由 serde 按未知字段忽略，导入不受影响。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
@@ -96,9 +97,6 @@ pub struct AgentsMd {
 pub struct SettingsSection {
     #[serde(default)]
     pub vendors: Vec<VendorEntry>,
-    /// 热键覆盖表（导入恒写启动器全局，无实例维度）。
-    #[serde(default)]
-    pub hotkeys: BTreeMap<String, String>,
     /// 注入 settings（`InjectConfig.settings` 的 JSON 形态；env 不在此结构内）。
     #[serde(default)]
     pub inject_settings: Map<String, serde_json::Value>,
@@ -110,7 +108,6 @@ impl SettingsSection {
     /// 是否携带任何设置内容（决定 `type` 推导与混合校验）。
     pub fn is_present(&self) -> bool {
         !self.vendors.is_empty()
-            || !self.hotkeys.is_empty()
             || !self.inject_settings.is_empty()
             || self.agents_md.as_ref().map_or(false, |a| {
                 a.global.is_some() || a.instance.is_some()
@@ -223,11 +220,6 @@ pub fn validate(m: &Manifest) -> Result<(), String> {
                 }
             }
         }
-        for action in settings.hotkeys.keys() {
-            if action.trim().is_empty() {
-                return Err("设置包的热键表存在空动作 id".into());
-            }
-        }
     }
     Ok(())
 }
@@ -255,8 +247,6 @@ pub struct ExportOptions {
     pub plugins: Vec<String>,
     #[serde(default)]
     pub include_vendors: bool,
-    #[serde(default)]
-    pub include_hotkeys: bool,
     #[serde(default)]
     pub include_inject: bool,
     #[serde(default)]
@@ -288,9 +278,6 @@ fn collect_settings(opts: &ExportOptions) -> Result<SettingsSection, String> {
             }
             section.vendors.push(entry);
         }
-    }
-    if opts.include_hotkeys {
-        section.hotkeys = crate::hotkey_store::load()?;
     }
     if opts.include_inject {
         section.inject_settings = crate::inject::effective_config(&opts.instance_id)?.settings;
@@ -474,7 +461,7 @@ fn export_pack_inner(
     }
 
     let wants_settings =
-        opts.include_vendors || opts.include_hotkeys || opts.include_inject || opts.include_agents_md;
+        opts.include_vendors || opts.include_inject || opts.include_agents_md;
     let settings = if wants_settings {
         progress("正在收集设置内容…".into());
         Some(collect_settings(opts)?)
@@ -835,24 +822,7 @@ fn apply_settings(
         report.warnings.extend(errs);
     }
 
-    // 2) 热键：合并写启动器全局（无实例维度）。
-    if !settings.hotkeys.is_empty() {
-        progress("正在合并热键配置…".into());
-        match crate::hotkey_store::load() {
-            Ok(mut current) => {
-                for (action, combo) in &settings.hotkeys {
-                    current.insert(action.clone(), combo.clone());
-                }
-                match crate::hotkey_store::save(&current) {
-                    Ok(()) => report.applied.push(format!("热键 ×{}", settings.hotkeys.len())),
-                    Err(e) => report.warnings.push(format!("热键写入失败：{e}")),
-                }
-            }
-            Err(e) => report.warnings.push(format!("热键写入失败：{e}")),
-        }
-    }
-
-    // 3) 注入 settings + AGENTS.md：按落点写全局默认模板或实例覆盖，随后物化。
+    // 2) 注入 settings + AGENTS.md：按落点写全局默认模板或实例覆盖，随后物化。
     let inject_changed = !settings.inject_settings.is_empty();
     let agents = settings.agents_md.as_ref();
     if !inject_changed && agents.is_none() {
@@ -979,7 +949,6 @@ mod tests {
                     { "vendor": "deepseek", "enabled": true, "models": ["deepseek-v4-pro"] },
                     { "vendor": "custom-x", "enabled": false, "models": [], "address": "https://relay.example/v1" }
                 ],
-                "hotkeys": { "nav-launch": "Alt+9" },
                 "injectSettings": { "llm-deepseek": { "thinking": "disabled" } },
                 "agentsMd": { "global": "全局规则", "instance": "实例规则" }
             }
@@ -994,13 +963,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_pack_hotkeys_field_is_ignored() {
+        // P4 时期旧包 manifest 带 settings.hotkeys（2026-09-25 随启动器热键功能
+        // 移除而退役）；serde 按未知字段忽略，旧包导入不受影响（fail-open 兼容）。
+        let text = serde_json::to_string(&json!({
+            "formatVersion": 1,
+            "type": "settings",
+            "name": "旧版设置包",
+            "settings": {
+                "hotkeys": { "nav-launch": "Alt+9" },
+                "injectSettings": { "llm-deepseek": { "thinking": "disabled" } }
+            }
+        }))
+        .unwrap();
+        let m = parse_and_validate(&text).unwrap();
+        assert_eq!(m.pack_type, PackType::Settings);
+        assert!(m
+            .settings
+            .as_ref()
+            .unwrap()
+            .inject_settings
+            .contains_key("llm-deepseek"));
+    }
+
+    #[test]
     fn mixed_type_accepted_when_both_present() {
         let text = serde_json::to_string(&json!({
             "formatVersion": 1,
             "type": "mixed",
             "name": "全家桶+配置",
             "plugins": [{ "name": "dsh-tui", "version": "0.2.1" }],
-            "settings": { "hotkeys": { "nav-more": "Alt+4" } }
+            "settings": { "injectSettings": { "llm-deepseek": { "thinking": "disabled" } } }
         }))
         .unwrap();
         let m = parse_and_validate(&text).unwrap();
@@ -1140,7 +1133,6 @@ mod tests {
         let manifest: Manifest = serde_json::from_value(json!({
             "formatVersion": 1, "type": "settings", "name": "纯设置",
             "settings": {
-                "hotkeys": { "nav-launch": "Alt+9" },
                 "injectSettings": { "llm-deepseek": { "thinking": "disabled" } },
                 "agentsMd": { "global": "全局规则", "instance": "实例规则" }
             }
@@ -1149,22 +1141,17 @@ mod tests {
         let base = tmp.join("packsrc");
         let dest = build_pack(&base, &manifest, &[]);
 
-        // 全局落点：注入进默认模板、全局 AGENTS.md 落根文件、热键合并。
+        // 全局落点：注入进默认模板、全局 AGENTS.md 落根文件。
         let mut progress_sink = |_d: String| {};
         let report = import_pack(&dest, &instance.id, Some(SettingsTarget::Global), &mut progress_sink)
             .unwrap();
         assert!(report.applied.contains(&"注入配置（全局默认）".to_string()));
         assert!(report.applied.contains(&"AGENTS.md".to_string()));
-        assert!(report.applied.iter().any(|a| a.contains("热键")));
         let template = crate::inject::get_default_template().unwrap();
         assert!(template.settings.contains_key("llm-deepseek"));
         assert_eq!(
             crate::inject::get_global_agents_md().unwrap().as_deref(),
             Some("全局规则")
-        );
-        assert_eq!(
-            crate::hotkey_store::load().unwrap().get("nav-launch").map(String::as_str),
-            Some("Alt+9")
         );
 
         // 实例落点：覆盖合并 + 立即物化（settings.yaml 与实例 AGENTS.md）。
@@ -1249,7 +1236,6 @@ mod tests {
         let manifest: Manifest = serde_json::from_value(json!({
             "formatVersion": 1, "type": "settings", "name": "新机器配置",
             "settings": {
-                "hotkeys": { "nav-launch": "Alt+9" },
                 "agentsMd": { "global": "全局规则" }
             }
         }))
@@ -1259,14 +1245,9 @@ mod tests {
 
         let report = import_pack(&dest, "", Some(SettingsTarget::Global), &mut sink).unwrap();
         assert!(report.applied.contains(&"AGENTS.md".to_string()));
-        assert!(report.applied.iter().any(|a| a.contains("热键")));
         assert_eq!(
             crate::inject::get_global_agents_md().unwrap().as_deref(),
             Some("全局规则")
-        );
-        assert_eq!(
-            crate::hotkey_store::load().unwrap().get("nav-launch").map(String::as_str),
-            Some("Alt+9")
         );
 
         // Instance 落点仍要求实例存在，fail loud 可读。
@@ -1351,12 +1332,6 @@ mod tests {
     fn export_settings_only_offline_roundtrip() {
         let (_lock, tmp) = crate::instances::tests::sandbox("modpack-export");
         let instance = crate::instances::create_instance("设置导出", "headless").unwrap();
-        crate::hotkey_store::save(&{
-            let mut m = std::collections::BTreeMap::new();
-            m.insert("nav-more".to_string(), "Alt+4".to_string());
-            m
-        })
-        .unwrap();
         crate::inject::set_global_agents_md(Some("全局指令".into())).unwrap();
 
         let opts = ExportOptions {
@@ -1364,7 +1339,6 @@ mod tests {
             name: "我的配置包".into(),
             plugins: vec![],
             include_vendors: false,
-            include_hotkeys: true,
             include_inject: false,
             include_agents_md: true,
         };
@@ -1373,7 +1347,6 @@ mod tests {
         assert_eq!(manifest.pack_type, PackType::Settings);
         assert!(dest.is_file(), "导出产物应存在：{}", dest.display());
         let peeked = peek_manifest(&dest).unwrap();
-        assert_eq!(peeked.settings.as_ref().unwrap().hotkeys.len(), 1);
         assert_eq!(
             peeked.settings.as_ref().unwrap().agents_md.as_ref().unwrap().global.as_deref(),
             Some("全局指令")

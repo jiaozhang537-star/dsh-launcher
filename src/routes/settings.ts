@@ -1,7 +1,7 @@
 /** 设置页：左分类（模型提供商 / 配置 / 热键）+ 右内容卡片，全局左右栏布局。 */
 import { el } from "../lib/dom";
 import type { PageDefinition } from "../router";
-import { formatCombo, hasPrimaryKey, HOTKEY_ACTIONS, loadBindings, resetBindings, saveBinding } from "../lib/hotkeys";
+import { BASELINE_DSH_VERSION, BASELINE_VERIFIED_RANGE, DSH_HOTKEY_GROUPS, DSH_HOTKEYS } from "../lib/dsh-hotkeys";
 import {
   cancelDownload,
   detectSystemNode,
@@ -1345,59 +1345,28 @@ async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
 
 // ===== 热键 =====
 
+/** 设置·热键 = DSH 网页端原版快捷键的只读速查（2026-09-25 需求方裁决）：
+ * 热键只有「DSH 网页端操作快捷键」一个含义，启动器不设自身快捷键；
+ * DSH 键位硬编码、无配置机制，整页只读、无任何编辑控件。 */
 function renderHotkeysPane(pane: HTMLElement): void {
   pane.replaceChildren();
   pane.append(
     el("p", { class: "settings-path" }, [
-      "快捷键在整个启动器界面生效（输入框聚焦时不触发）；点击输入框后按下新组合即可修改，Esc 取消。",
+      `DSH 网页端（浏览器界面）的原版快捷键。键位由 DSH 本体决定，启动器不提供修改；目录基线 DSH ${BASELINE_DSH_VERSION}（${BASELINE_VERIFIED_RANGE} 实测一致，DSH 升级后复检）。`,
     ]),
   );
-  const list = el("div", { class: "hotkey-list" }, []);
-  const refreshRows = (): void => {
-    list.replaceChildren();
-    for (const binding of loadBindings()) {
-      const action = HOTKEY_ACTIONS.find((a) => a.id === binding.action);
-      if (!action) continue;
-      const capture = el("input", { type: "text", class: "settings-input hotkey-capture", readonly: "" }) as HTMLInputElement;
-      capture.value = binding.combo;
-      capture.addEventListener("focus", () => {
-        capture.value = "按下新组合…";
-        capture.classList.add("hotkey-capture--recording");
-      });
-      capture.addEventListener("keydown", (event) => {
-        event.preventDefault();
-        if (event.key === "Escape") {
-          capture.value = binding.combo;
-          capture.classList.remove("hotkey-capture--recording");
-          return;
-        }
-        const combo = formatCombo(event);
-        if (!hasPrimaryKey(combo)) {
-          capture.value = "修饰键需搭配主键（如 Alt+1）——单独按下修饰键不生效";
-          return;
-        }
-        saveBinding(binding.action, combo);
-        refreshRows();
-      });
-      capture.addEventListener("blur", () => {
-        capture.classList.remove("hotkey-capture--recording");
-        capture.value = loadBindings().find((b) => b.action === binding.action)?.combo ?? binding.combo;
-      });
+  for (const group of DSH_HOTKEY_GROUPS) {
+    const list = el("div", { class: "hotkey-list" }, []);
+    for (const entry of DSH_HOTKEYS.filter((e) => e.group === group.id)) {
       list.append(
         el("div", { class: "hotkey-row" }, [
-          el("span", { class: "hotkey-row__label" }, [action.label]),
-          capture,
+          el("span", { class: "hotkey-row__label" }, [entry.label]),
+          el("span", { class: "hotkey-row__keys" }, entry.keys.map((key) => el("kbd", { class: "hotkey-kbd" }, [key]))),
         ]),
       );
     }
-  };
-  refreshRows();
-  const resetBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["恢复默认"]);
-  resetBtn.addEventListener("click", () => {
-    resetBindings();
-    refreshRows();
-  });
-  pane.append(list, el("div", { class: "settings-actions" }, [resetBtn]));
+    pane.append(el("h2", { class: "card__title" }, [group.label]), list);
+  }
 }
 
 // ===== 页面壳 =====
