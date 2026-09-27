@@ -1,6 +1,7 @@
 /** Tauri invoke 的类型化薄封装：实例进程生命周期（FR-15/FR-08）。 */
 
 import type { Report } from "./precheck";
+import { invoke } from "./tauri";
 
 export interface RunStatus {
   instanceId: string;
@@ -57,10 +58,7 @@ export interface ExitNotice {
   code: number;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 运行启动前校验链。 */
 export function runPrecheck(instanceId: string): Promise<Report> {

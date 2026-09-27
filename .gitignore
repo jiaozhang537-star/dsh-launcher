@@ -54,3 +54,9 @@ _src.svg
 
 # npm 沙盒实验目录
 .tmp/
+
+# 走查/对照截图（大体积二进制 + 含本机环境信息，仅本地留档不入库；phase 文档中路径指向本地）
+docs/plans/assets
+
+# ZCode 工具生成的搜索排除配置（非项目文件）
+.zcodeignore

@@ -1,4 +1,6 @@
-import { el } from "../lib/dom";
+import { collapseArrow, el, pclCheck } from "../lib/dom";
+import { collapseToggle } from "../lib/anim";
+import { icon } from "../lib/icons";
 import { getSelectedInstance } from "../lib/selected-instance";
 import type { PageDefinition } from "../router";
 import {
@@ -10,7 +12,6 @@ import {
   setInjectOverride,
   type Instance,
 } from "../services/instances";
-import { DEEPSEEK_MODELS } from "../services/keyvault";
 import {
   pluginCheckUpdates,
   pluginList,
@@ -39,7 +40,8 @@ const SECTION_LABELS: Record<SectionId, string> = {
 /** 折叠组：标题行 + 可折叠列表（对标 PCL 折叠条）。 */
 function collapsibleGroup(title: string, count: number, collapsed: boolean, rows: HTMLElement[]): HTMLElement {
   const list = el("div", { class: "collapse-group__list" }, rows);
-  const arrow = el("span", { class: "collapse-bar__arrow" }, [collapsed ? "▸" : "▾"]);
+  const { root: arrow, sync: syncArrow } = collapseArrow();
+  syncArrow(collapsed);
   const header = el(
     "button",
     { type: "button", class: "collapse-bar" },
@@ -47,8 +49,10 @@ function collapsibleGroup(title: string, count: number, collapsed: boolean, rows
   );
   list.hidden = collapsed;
   header.addEventListener("click", () => {
-    list.hidden = !list.hidden;
-    arrow.textContent = list.hidden ? "▸" : "▾";
+    const opening = list.hidden;
+    // R5：高度动画展开/收起（anim.ts collapseToggle），箭头旋转逻辑不变。
+    collapseToggle(list, opening);
+    syncArrow(!opening);
   });
   return el("div", { class: "collapse-group" }, [header, list]);
 }
@@ -126,16 +130,6 @@ export const instanceSettingsPage: PageDefinition = {
             })()),
           ]),
           nameStatus,
-          el("div", { class: "settings-field" }, [
-            el("span", {}, ["置顶（启动页排序置顶）"]),
-            (() => {
-              const toggle = el("button", { type: "button", class: "toggle-switch", role: "switch" }, []);
-              toggle.classList.add("toggle-switch--off");
-              toggle.disabled = true;
-              toggle.title = "Phase 5 交付";
-              return toggle;
-            })(),
-          ]),
         ]),
         renderQuickOpenCard(inst),
         renderSourcesCard(inst),
@@ -144,7 +138,7 @@ export const instanceSettingsPage: PageDefinition = {
 
     /** 快捷打开卡（2026-09-12 追加批次）：横排三个按钮直达 skills / 对话 / 源码文件夹。 */
     function renderQuickOpenCard(inst: Instance): HTMLElement {
-      const status = el("span", { class: "settings-path" }, ["在系统文件管理器中打开对应文件夹。"]);
+      const status = el("span", { class: "settings-path" }, []);
       const makeBtn = (label: string, which: "skills" | "sessions" | "sources"): HTMLElement => {
         const btn = el("button", { type: "button", class: "btn btn--line" }, [label]);
         btn.addEventListener("click", () => {
@@ -175,10 +169,9 @@ export const instanceSettingsPage: PageDefinition = {
 
     /** 源码归档卡片（FR-22 修订）：为该版本补下载官方源码到 `versions/<id>/sources/`。 */
     function renderSourcesCard(inst: Instance): HTMLElement {
+      // 静止时无说明文字；仅两处功能性状态：本体未装（按钮禁用原因）与运行时回执。
       const status = el("span", { class: "settings-path" }, [
-        inst.dshVersion
-          ? "下载官方源码归档到本版本目录，供 AI 辅助插件开发参考（不可用于启动）。"
-          : "该版本尚未安装 DSH 本体——先到「下载」页安装，再下载源码。",
+        inst.dshVersion ? "" : "该版本尚未安装 DSH 本体——先到「下载」页安装，再下载源码。",
       ]);
       const actions = el("div", { class: "settings-actions" }, []);
       let downloaded = false;
@@ -258,7 +251,7 @@ export const instanceSettingsPage: PageDefinition = {
         })
           .then(() => {
             downloaded = true;
-            status.textContent = "源码归档已就位 ✓（本版本 sources/ 目录，可打开查看）";
+            status.textContent = "源码归档已就位（本版本 sources/ 目录，可打开查看）";
             openBtn.hidden = false;
             delBtn.hidden = false;
           })
@@ -280,19 +273,6 @@ export const instanceSettingsPage: PageDefinition = {
     // ===== 设置 =====
     function renderSettings(): void {
       const inst = currentInstance!;
-      const isolation = el("button", { type: "button", class: "toggle-switch toggle-switch--on", role: "switch" }, []);
-      isolation.disabled = true;
-      isolation.title = "Phase 5 交付";
-      const modelSelect = document.createElement("select");
-      modelSelect.className = "settings-select";
-      for (const m of DEEPSEEK_MODELS) {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
-        modelSelect.append(opt);
-      }
-      modelSelect.disabled = true;
-      modelSelect.title = "Phase 5 交付";
 
       // 局部 AGENTS.md（FILE-LAYOUT：输入框落点 = versions/<id>/AGENTS.md 的源头，
       // 覆盖存实例 inject.json；未自设时由全局默认物化）。
@@ -349,26 +329,8 @@ export const instanceSettingsPage: PageDefinition = {
 
       rightArea.append(
         el("section", { class: "card settings-card" }, [
-          el("h2", { class: "card__title" }, ["版本隔离"]),
-          el("div", { class: "settings-node-card" }, [
-            isolation,
-            el("span", { class: "settings-path" }, [
-              "按实例关闭隔离（插件与配置回退全局共享区）—— Phase 5 交付",
-            ]),
-          ]),
-        ]),
-        el("section", { class: "card settings-card" }, [
-          el("h2", { class: "card__title" }, ["默认使用的模型"]),
-          el("div", { class: "settings-node-card" }, [
-            modelSelect,
-            el("span", { class: "settings-path" }, ["写入该实例的注入配置 —— Phase 5 交付"]),
-          ]),
-        ]),
-        el("section", { class: "card settings-card" }, [
           el("h2", { class: "card__title" }, ["AGENTS.md"]),
-          el("p", { class: "settings-path" }, [
-            "本版本的局部指令；未单独设置时使用「设置 → 配置」里的全局 AGENTS.md。局部设置 = 覆盖全局（非叠加），启动该版本时生效。",
-          ]),
+          el("p", { class: "settings-path" }, ["未单独设置时使用全局 AGENTS.md；局部设置覆盖全局。"]),
           agentsArea,
           agentsStatus,
         ]),
@@ -417,29 +379,26 @@ export const instanceSettingsPage: PageDefinition = {
       function rowAll(p: PluginRow): HTMLElement {
         const subParts = [p.version || "未知版本", GROUP_LABELS[p.group]];
         if (p.group !== "builtin" && p.spec) subParts.push(p.spec);
-        const enableBox = el("input", { type: "checkbox", class: "plugin-row__enable" }) as HTMLInputElement;
-        enableBox.checked = p.inBundles;
+        const enableCheck = pclCheck({ checked: p.inBundles });
+        const enableBox = enableCheck.input;
         if (p.group === "builtin") {
           enableBox.disabled = true;
-          enableBox.title = "dsh 内置层随本体分发，恒启用";
+          enableCheck.root.title = "内置组件，恒启用";
         } else if (!p.declaresPatch) {
           // 纯依赖包（如 UI 库，keywords 打了 dsh-plugin 混进市场的典型）：
           // 没有可加载的插件层，无「启用」概念——禁用灰框如实呈现。
           enableBox.disabled = true;
-          enableBox.title = "纯依赖包：未声明 dsh.bundle.patch，不作为插件层加载（无需启用，可点右侧删除）";
+          enableCheck.root.title = "依赖库，不可作为插件启用";
         } else {
-          enableBox.title = p.inBundles
-            ? "已启用——取消勾选 = 停用（下次启动实例生效）"
-            : "已停用——勾选 = 启用（下次启动实例生效）";
+          enableCheck.root.title = p.inBundles
+            ? "取消勾选即停用（下次启动生效）"
+            : "勾选即启用（下次启动生效）";
           enableBox.addEventListener("change", () => {
             enableBox.disabled = true;
             setStatus(`正在${enableBox.checked ? "启用" : "停用"} ${p.name}…`);
             void pluginSetEnabled(inst.id, p.name, enableBox.checked)
               .then(() => {
-                setStatus(
-                  `${enableBox.checked ? "已启用" : "已停用"} ${p.name}——下次启动实例时生效` +
-                    `（注意：官方插件增删会让停用项重新启用）`,
-                );
+                setStatus(`${enableBox.checked ? "已启用" : "已停用"} ${p.name}（下次启动生效）`);
                 void load();
               })
               .catch((err) => {
@@ -450,7 +409,7 @@ export const instanceSettingsPage: PageDefinition = {
           });
         }
         let armed = false;
-        const remove = el("button", { type: "button", class: "plugin-row__remove", title: "删除插件" }, ["🗑"]);
+        const remove = el("button", { type: "button", class: "plugin-row__remove", title: "删除插件" }, [icon("trash", 15)]);
         remove.addEventListener("click", (event) => {
           event.stopPropagation();
           if (!armed) {
@@ -477,7 +436,7 @@ export const instanceSettingsPage: PageDefinition = {
             });
         });
         const row = el("div", { class: "ver-row plugin-row" }, [
-          enableBox,
+          enableCheck.root,
           el("span", { class: "ver-row__main" }, [p.name]),
           el("span", { class: "ver-row__sub" }, [subParts.join(" · ")]),
         ]);
@@ -495,9 +454,9 @@ export const instanceSettingsPage: PageDefinition = {
           const kids = p.modpackChildren;
           if (!kids || kids.length === 0) continue;
           const rows = kids.map((c) => {
-            const box = el("input", { type: "checkbox", class: "plugin-row__enable" }) as HTMLInputElement;
-            box.checked = !c.disabled;
-            box.title = c.disabled
+            const check = pclCheck({ checked: !c.disabled });
+            const box = check.input;
+            check.root.title = c.disabled
               ? "已停用——勾选 = 启用（运行中实例热重载即时生效；未运行则下次启动生效）"
               : "已启用——取消勾选 = 停用（运行中实例热重载即时生效；未运行则下次启动生效）";
             box.addEventListener("change", () => {
@@ -517,7 +476,7 @@ export const instanceSettingsPage: PageDefinition = {
                 });
             });
             return el("div", { class: "ver-row plugin-row" }, [
-              box,
+              check.root,
               el("span", { class: "ver-row__main" }, [c.name]),
               el("span", { class: "ver-row__sub" }, [c.version ? `v${c.version}` : "未知版本"]),
             ]);
@@ -530,8 +489,9 @@ export const instanceSettingsPage: PageDefinition = {
         return out;
       }
 
-      function rowUpdate(u: { name: string; current: string; latest: string; updatable: boolean }): HTMLElement {        const badge = u.updatable
-          ? el("span", { class: "mk-badge mk-badge--latest" }, [`可更新 → ${u.latest}`])
+      function rowUpdate(u: { name: string; current: string; latest: string; updatable: boolean }): HTMLElement {
+        const badge = u.updatable
+          ? el("span", { class: "mk-badge mk-badge--latest", title: `最新 v${u.latest}` }, ["可更新"])
           : el("span", { class: "mk-badge" }, ["已是最新"]);
         return el("div", { class: "ver-row plugin-row" }, [
           el("span", { class: "ver-row__main" }, [u.name]),
@@ -560,9 +520,7 @@ export const instanceSettingsPage: PageDefinition = {
               return;
             }
             setStatus(
-              `已扫描 ${list.plugins.length} 个插件（内置 ${builtin.length} / 第三方 ${third.length} / 自建 ${self.length}）——` +
-                "这一节每次进入都重新读盘（读该 profile 的清单），所以在网页会话里跑 `dsh plugin add` 装上的插件，" +
-                "点「重新扫描」即可看到；插件本身仍要下次启动该实例才加载。清单里没有记录的包（例如手放进 node_modules 的）不在此列。",
+              `已扫描 ${list.plugins.length} 个插件（内置 ${builtin.length} / 第三方 ${third.length} / 自建 ${self.length}）。`,
             );
             const modpacks = modpackRows(list.plugins);
             // 空组不出卡：删掉组内最后一个插件后，0 条的折叠组仍渲染标题行 +
@@ -644,12 +602,10 @@ export const instanceSettingsPage: PageDefinition = {
             );
           }
           for (const p of third) {
-            const box = el("input", { type: "checkbox", "data-name": p.name }) as HTMLInputElement;
-            const row = el("label", { class: "modpack-radio" }, [
-              box,
-              el("span", {}, [`${p.name} ${p.version ? `v${p.version}` : ""}`]),
-            ]);
-            pluginListArea.append(row);
+            const check = pclCheck({ label: `${p.name} ${p.version ? `v${p.version}` : ""}` });
+            check.input.dataset.name = p.name;
+            // 行容器沿用 modpack-radio 版式（原 label 包 input 改为 div 包自绘勾选）。
+            pluginListArea.append(el("div", { class: "modpack-radio" }, [check.root]));
           }
         } catch (err) {
           pluginListArea.replaceChildren(
@@ -669,9 +625,9 @@ export const instanceSettingsPage: PageDefinition = {
           "提供商不含 API Key；注入配置与环境变量永不入包。",
         ]),
         ...["模型提供商", "注入配置", "AGENTS.md"].map((label) => {
-          const box = el("input", { type: "checkbox" }) as HTMLInputElement;
-          settingChecks.push({ box, label });
-          return el("label", { class: "modpack-radio" }, [box, el("span", {}, [label])]);
+          const check = pclCheck({ label });
+          settingChecks.push({ box: check.input, label });
+          return el("div", { class: "modpack-radio" }, [check.root]);
         }),
         el("h2", { class: "card__title" }, ["包名与落点"]),
         nameInput,
@@ -755,7 +711,7 @@ export const instanceSettingsPage: PageDefinition = {
     })();
 
     return el("section", { class: "page" }, [
-      el("div", { class: "sub" }, [
+      el("div", { class: "sub sub--compact" }, [
         el("aside", { class: "sub-left" }, [nav]),
         el("section", { class: "sub-right" }, [rightArea]),
       ]),

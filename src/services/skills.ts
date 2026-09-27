@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：Skill 中心（FR-14，T-4 定稿口径）。 */
+import { invoke } from "./tauri";
 
 export interface SkillCard {
   name: string;
@@ -32,10 +33,7 @@ export interface SkillProgress {
   detail: string;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 技能目录信息流（GitHub `dsh-skill` 聚合；offline=true 时读离线快照）。 */
 export function fetchSkillFeed(): Promise<SkillFeed> {

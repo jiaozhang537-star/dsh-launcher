@@ -1,5 +1,6 @@
 import "./styles/theme.css";
 import "./styles/main.css";
+import { initHintHost, showHint } from "./lib/hint";
 import { createTopbar } from "./components/topbar";
 import { launchPage } from "./routes/launch";
 import { downloadsPage } from "./routes/downloads";
@@ -7,9 +8,12 @@ import { settingsPage } from "./routes/settings";
 import { morePage } from "./routes/more";
 import { instanceSelectPage } from "./routes/instance-select";
 import { instanceSettingsPage } from "./routes/instance-settings";
+import { marketDetailPage } from "./routes/market-detail";
+import { tasksPage } from "./routes/tasks";
+import { mountTaskFab } from "./components/task-fab";
 import { mountRouter, registerPages } from "./router";
 
-registerPages([launchPage, downloadsPage, settingsPage, morePage, instanceSelectPage, instanceSettingsPage]);
+registerPages([launchPage, downloadsPage, settingsPage, morePage, instanceSelectPage, instanceSettingsPage, marketDetailPage, tasksPage]);
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) {
@@ -17,6 +21,9 @@ if (!root) {
 }
 
 root.classList.add("app-shell");
+// 左下轻提示宿主（Phase 5 S5）：挂在 app-shell 容器内、弹窗遮罩层之下。
+initHintHost(root);
+mountTaskFab(root);
 root.append(createTopbar());
 
 const main = document.createElement("main");
@@ -52,7 +59,7 @@ window.addEventListener("drop", (event) => {
       });
       await openModpackImport(stagedPath);
     } catch (err) {
-      alert(`拖入导入失败：${String(err).slice(0, 240)}`);
+      showHint(`拖入导入失败：${String(err).slice(0, 240)}`);
     }
   })();
 });

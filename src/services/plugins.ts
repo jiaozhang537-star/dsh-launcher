@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：插件安装/移除/清单/更新检查（FR-03 配套）。 */
+import { invoke } from "./tauri";
 
 export type PluginGroup = "builtin" | "thirdparty" | "selfmade";
 
@@ -51,10 +52,7 @@ export interface PluginProgress {
   detail: string;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 已装插件三分组清单（dsh 内置 / 第三方 / 自建，内置组不可删）。 */
 export function pluginList(instanceId: string): Promise<PluginList> {

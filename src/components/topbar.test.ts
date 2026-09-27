@@ -12,7 +12,8 @@ async function freshTopbar() {
 }
 
 const settle = async (): Promise<void> => {
-  for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  // 两阶段切换：退场 110ms 后才换内容并通知 topbar——等待需覆盖该延迟。
+  await new Promise((resolve) => setTimeout(resolve, 150));
 };
 
 const LAUNCH: PageDefinition = {
@@ -48,9 +49,9 @@ describe("topbar 二级页形态", () => {
     document.body.replaceChildren();
   });
 
-  it("导航页隐藏二级栏（← + 页面名）", async () => {
+  it("导航页隐藏二级栏（← + 页面名）；显隐由 .is-visible 类驱动（R5 过渡）", async () => {
     const { secondary } = await mounted();
-    expect(secondary.hidden).toBe(true);
+    expect(secondary.classList.contains("is-visible")).toBe(false);
   });
 
   it("二级页带返回栏，标题只到页面名——不带实例名（需求方 2026-09-20 裁决）", async () => {
@@ -58,7 +59,7 @@ describe("topbar 二级页形态", () => {
     router.navigate("instance-settings");
     await settle();
 
-    expect(secondary.hidden).toBe(false);
+    expect(secondary.classList.contains("is-visible")).toBe(true);
     expect(title.textContent).toBe("版本设置");
   });
 });

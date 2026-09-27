@@ -28,11 +28,11 @@ function makePage(id: string): PageDefinition {
 async function waitForHashSettled(expected: string): Promise<void> {
   for (let i = 0; i < 50; i++) {
     if (location.hash === expected) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await new Promise((resolve) => setTimeout(resolve, 150));
       if (location.hash === expected) return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
 }
 
@@ -51,7 +51,7 @@ describe("router", () => {
 
     r.navigate("downloads");
     // hashchange 由 happy-dom 异步派发，等待微任务后断言
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     expect(location.hash).toBe("#/downloads");
     expect(container.querySelector("section")?.dataset.page).toBe("downloads");
   });

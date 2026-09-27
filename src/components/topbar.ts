@@ -1,7 +1,8 @@
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import { el } from "../lib/dom";
+import { icon } from "../lib/icons";
 import { renderNavIcon, type NavIconName } from "./nav-icons";
-import { navigate, pageById, registeredPages, subscribe } from "../router";
+import { goBack, navigate, pageById, registeredPages, subscribe } from "../router";
 
 /** 页面 id → PCL 导航图标。 */
 const NAV_ICONS: Record<string, NavIconName> = {
@@ -53,20 +54,21 @@ export function createTopbar(): HTMLElement {
   const backBtn = el(
     "button",
     { type: "button", class: "topbar__back", "aria-label": "返回", title: "返回" },
-    ["\u2190"],
+    [icon("back", 16)],
   );
-  backBtn.addEventListener("click", () => navigate("launch"));
+  backBtn.addEventListener("click", () => goBack());
   const secTitle = el("span", { class: "topbar__sec-title" }, []);
   const secWrap = el("div", { class: "topbar__secondary" }, [backBtn, secTitle]);
-  secWrap.hidden = true;
 
+  // 主↔子切换（R5）：纯 class 驱动过渡（350ms 入 / 150ms 出，spec §5「标题栏主↔子
+  // 150/350ms OutBack」），不再用 hidden 硬切；显隐样式全在 CSS（.is-visible）。
   const syncSecondary = (pageId: string): void => {
     const def = pageById(pageId);
     const isSecondary = def?.secondary === true;
-    secWrap.hidden = !isSecondary;
+    secWrap.classList.toggle("is-visible", isSecondary);
     bar.classList.toggle("topbar--secondary", isSecondary);
     if (isSecondary) {
-      secTitle.textContent = def?.navLabel ?? "";
+      secTitle.textContent = def?.titleOf?.() ?? def?.navLabel ?? "";
     }
   };
 
@@ -85,18 +87,24 @@ export function createTopbar(): HTMLElement {
   const minimizeBtn = el(
     "button",
     { type: "button", class: "win-btn", "aria-label": "最小化", title: "最小化" },
-    ["\u2500"],
+    [icon("win-min", 14)],
   );
   const closeBtn = el(
     "button",
     { type: "button", class: "win-btn win-btn--close", "aria-label": "关闭", title: "关闭" },
-    ["\u2715"],
+    [icon("win-close", 14)],
   );
   // PCL2 FormMain 仅有最小化与关闭两键（无最大化）；双击不改变窗口大小。
   minimizeBtn.addEventListener("click", () => void withWindow((win) => win.minimize()));
   closeBtn.addEventListener("click", () => void withWindow((win) => win.close()));
 
-  const brand = el("span", { class: "topbar__brand" }, ["DSH 启动器"]);
+  // 品牌区：白色鲸鱼标 + DSH 字标（对标 PCL 字标位：白描边矢量、宽约 39px、Margin 19,15.5）
+  const brandMark = document.createElement("img");
+  brandMark.className = "topbar__brand-mark";
+  brandMark.src = "/version-icon/dsh-black.svg";
+  brandMark.alt = "";
+  brandMark.draggable = false;
+  const brand = el("span", { class: "topbar__brand" }, [brandMark, "DSH"]);
 
   const bar = el("header", { class: "topbar" });
   // 手动拖拽：mousedown 冒泡自品牌/导航文字/按钮间空隙均可触发；

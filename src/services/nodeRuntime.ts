@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：Node 运行时代管相关命令。 */
+import { invoke } from "./tauri";
 
 export interface SystemNodeInfo {
   version: string;
@@ -11,10 +12,7 @@ export interface DownloadProgress {
   total: number;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 检测 PATH 上的系统 Node；未安装返回 null。 */
 export function detectSystemNode(): Promise<SystemNodeInfo | null> {

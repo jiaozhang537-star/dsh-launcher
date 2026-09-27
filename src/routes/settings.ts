@@ -1,7 +1,8 @@
 /** 设置页：左分类（模型提供商 / 配置 / 热键）+ 右内容卡片，全局左右栏布局。 */
-import { el } from "../lib/dom";
+import { el, pclCheck } from "../lib/dom";
+import { icon } from "../lib/icons";
 import type { PageDefinition } from "../router";
-import { BASELINE_DSH_VERSION, BASELINE_VERIFIED_RANGE, DSH_HOTKEY_GROUPS, DSH_HOTKEYS } from "../lib/dsh-hotkeys";
+import { DSH_HOTKEY_GROUPS, DSH_HOTKEYS } from "../lib/dsh-hotkeys";
 import {
   cancelDownload,
   detectSystemNode,
@@ -11,7 +12,7 @@ import {
   setDefaultVersion,
   type SystemNodeInfo,
 } from "../services/nodeRuntime";
-import { getGlobalAgentsMd, getInstancesDir, getRouteReport, setGlobalAgentsMd } from "../services/instances";
+import { getGlobalAgentsMd, getInstancesDir, setGlobalAgentsMd } from "../services/instances";
 import { getMirror, setCommunityMirror, setMirror, testMirror, type MirrorSettingsInfo } from "../services/gateway";
 import {
   clearKey,
@@ -28,7 +29,6 @@ import {
 import { fetchModels } from "../services/provider";
 import { keySaveEligible } from "../lib/vendor";
 import { providerIconPath } from "../lib/providerIcon";
-import { getSelectedInstance } from "../lib/selected-instance";
 import {
   addCustomProvider,
   fetchProvidersView,
@@ -97,9 +97,9 @@ function renderProviderCard(
 
   // ── 头部：整卡可拖拽（走查定稿：六点把手废除）+ 启用勾选（点击不折叠）
   //    + 图标 + 名称（点击折叠）+ 徽章 + 箭头 ──
-  const enableBox = el("input", { type: "checkbox" }) as HTMLInputElement;
-  enableBox.checked = vendor.enabled;
-  enableBox.addEventListener("click", (event) => event.stopPropagation());
+  const enableCheck = pclCheck({ checked: vendor.enabled });
+  const enableBox = enableCheck.input;
+  enableCheck.root.addEventListener("click", (event) => event.stopPropagation());
   enableBox.addEventListener("change", () => {
     void (async () => {
       enableBox.disabled = true;
@@ -114,14 +114,14 @@ function renderProviderCard(
       }
     })();
   });
-  const icon = meta.iconUrl
+  const vendorIcon = meta.iconUrl
     ? (() => {
         const img = el("img", { class: "provider-card__icon", src: meta.iconUrl!, alt: "", draggable: "false" });
         img.addEventListener("error", () => img.replaceWith(letterTile(meta.label)));
         return img;
       })()
     : letterTile(meta.label);
-  const chevron = el("span", { class: "provider-card__chevron" }, [open ? "▾" : "▸"]);
+  const chevron = el("span", { class: "provider-card__chevron" }, [icon("chevron-down", 12)]);
   const keyReady = vendor.hasKey || vendor.envAuto;
   const badge = el("span", { class: `settings-badge ${keyReady ? "settings-badge--ok" : "settings-badge--bad"}` }, [
     vendor.hasKey ? "保险库已存 Key" : vendor.envAuto ? "环境变量已提供" : "无 Key（可稍后补）",
@@ -130,14 +130,13 @@ function renderProviderCard(
   const head = el(
     "div",
     { class: "provider-card__head", title: "拖拽卡片调整顺序（即启动页下拉顺序）" },
-    [enableBox, icon, el("span", { class: "provider-card__name" }, [meta.label]),
+    [enableCheck.root, vendorIcon, el("span", { class: "provider-card__name" }, [meta.label]),
       el("span", { class: "provider-card__spacer" }, []), styleTag, badge, chevron],
   );
   head.addEventListener("click", () => {
     open = !open;
     card.classList.toggle("provider-card--open", open);
     body.hidden = !open;
-    chevron.textContent = open ? "▾" : "▸";
   });
 
   // ── 地址 ──
@@ -180,7 +179,7 @@ function renderProviderCard(
         await setKey(vendor.vendor, value);
         keyEdited = false;
         keyInput.value = KEY_MASK;
-        note("Key 已加密保存 ✓");
+        note("Key 已加密保存");
       } catch (err) {
         note(`保存失败：${String(err).slice(0, 200)}`, true);
       } finally {
@@ -234,7 +233,7 @@ function renderProviderCard(
     for (const model of fetched) {
       const added = models.includes(model);
       const chip = el("button", { type: "button", class: `model-chip ${added ? "model-chip--added" : ""}` }, [
-        added ? "✓ 已添加" : `+ ${model}`,
+        ...(added ? [icon("check", 11), "已添加"] : [icon("plus", 11), model]),
       ]);
       if (!added) {
         chip.addEventListener("click", () => {
@@ -370,11 +369,6 @@ function addedBuiltinsOf(status: KeyvaultStatus): Set<string> {
 
 async function renderProvidersPane(pane: HTMLElement, pendingNote?: string): Promise<void> {
   pane.replaceChildren();
-  pane.append(
-    el("p", { class: "settings-path" }, [
-      "列表只显示已添加的提供方——点「⊕ 添加提供方」从内置预设加入（添加即默认启用、追加列表末尾），点「⊕ 自定义提供方」自建中转；按住卡片拖拽调整顺序（即启动页下拉顺序）；展开卡片配置地址、Key 与模型。",
-    ]),
-  );
   // 状态行放面板顶部：启用/保存/添加/移除的成败反馈必须肉眼可见（此前钉在
   // 面板最底部，勾选失败回弹时用户根本看不到原因）。
   const statusLine = el("p", { class: "settings-status" }, []);
@@ -595,69 +589,18 @@ async function renderProvidersPane(pane: HTMLElement, pendingNote?: string): Pro
     listWrap,
     el("div", { class: "settings-row" }, [
       (() => {
-        const btn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["⊕ 添加提供方"]);
+        const btn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, [icon("plus", 13), "添加提供方"]);
         btn.addEventListener("click", () => openPresetProviderModal(view, status, note, hooks));
         return btn;
       })(),
       (() => {
-        const btn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["⊕ 自定义提供方"]);
+        const btn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, [icon("plus", 13), "自定义提供方"]);
         btn.addEventListener("click", () => openCustomProviderModal(hooks));
         return btn;
       })(),
     ]),
-    routeAuditPane(),
   );
   if (pendingNote) note(pendingNote);
-}
-
-/**
- * 实例路由对账（R7-5）：网页侧与启动器侧是**两套写方**，这里只读地对账，让用户
- * 知道哪些提供方没进实例、哪些是启动器不管的外来路由。判定全部来自后端
- * （`instance_route_report`，与启动前校验、桥接同一份）。
- */
-function routeAuditPane(): HTMLElement {
-  const box = el("section", { class: "card settings-card" }, [
-    el("h3", {}, ["实例路由对账（只读）"]),
-  ]);
-  const body = el("div", { class: "settings-status" }, ["读取中…"]);
-  box.append(
-    el("p", { class: "settings-path" }, [
-      "启动器只把「已启用且有模型」的厂商写进选中实例的 settings.yaml；实例里其它提供方（你在 DSH 网页「设置 · 模型」里自己加的）启动器不读也不改，原样保留。",
-    ]),
-    body,
-  );
-  const instId = getSelectedInstance();
-  if (!instId) {
-    body.textContent = "尚未选择实例——到「启动」页选一个实例后这里显示对账结果。";
-    return box;
-  }
-  void getRouteReport(instId)
-    .then((report) => {
-      const lines: string[] = [];
-      for (const skipped of report.skipped) {
-        lines.push(
-          skipped.reason === "no-models"
-            ? `· 「${skipped.label}」没有模型，不会写进实例（DSH 里看不到它）——点开它的卡片「拉模型」或手填模型即可`
-            : `· 「${skipped.label}」的接口形态（gemini）在 DSH 配置协议里没有对应者，写不进实例——改用 OpenAI 兼容地址`,
-        );
-      }
-      if (report.external.length > 0) {
-        lines.push(
-          `· 实例里的外来提供方（网页侧添加，启动器不读不改）：${report.external.join("、")}`,
-        );
-      }
-      if (lines.length === 0) {
-        body.textContent = "全部已启用厂商都已写入实例，实例里也没有启动器之外的提供方。";
-        return;
-      }
-      body.textContent = "";
-      for (const line of lines) body.append(el("p", { class: "settings-path" }, [line]));
-    })
-    .catch((err) => {
-      body.textContent = `读取失败：${String(err).slice(0, 200)}`;
-      body.classList.add("settings-status--error");
-    });
-  return box;
 }
 
 /** 接口形态 → 对话端点路径（地址+格式预览用：壳只负责拉模型清单，对话
@@ -770,7 +713,7 @@ function openPresetProviderModal(
   sync();
 
   const errLine = el("p", { class: "settings-status settings-status--error" }, []);
-  const addBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["⊕ 添加到列表"]);
+  const addBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, [icon("plus", 13), "添加到列表"]);
   const { overlay, close } = openModalShell("添加提供方", [
     labeledRow("提供方", presetSel),
     labeledRow("API 地址", baseInput),
@@ -826,7 +769,7 @@ function openCustomProviderModal(hooks: ProviderAddHooks): void {
   syncPreview();
 
   const errLine = el("p", { class: "settings-status settings-status--error" }, []);
-  const addBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["⊕ 添加自定义提供方"]);
+  const addBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, [icon("plus", 13), "添加自定义提供方"]);
   const { overlay, close } = openModalShell("自定义提供方", [
     labeledRow("名称", nameInput),
     labeledRow("API 地址", baseInput),
@@ -977,7 +920,7 @@ async function renderNodePanel(card: HTMLElement, note?: string): Promise<void> 
             total > 0 ? `下载中 ${formatBytes(received)} / ${formatBytes(total)}` : `已接收 ${formatBytes(received)}`;
         });
         // 重渲染清掉进度行，完成提示经 note 在新面板中显示。
-        await renderNodePanel(card, `已托管 ${version} ✓`);
+        await renderNodePanel(card, `已托管 ${version}`);
       } catch (err) {
         const text = String(err);
         progressLabel.textContent = text.includes("已取消") ? "已取消下载" : `下载失败：${text}`;
@@ -1073,17 +1016,14 @@ async function renderMirrorPanel(card: HTMLElement): Promise<void> {
   });
 
   card.append(
-    el("p", { class: "settings-path" }, [
-      "DSH 本体与 Node 运行时的下载通道：npm 走 npmmirror 优先、失败自动回落官方；GitHub 默认官方直连。自定义前缀仅作用于 GitHub 类下载。",
-    ]),
     el("div", { class: "settings-row" }, [el("span", {}, ["下载通道："]), select]),
     el("div", { class: "settings-row" }, [prefixInput, saveBtn, testBtn]),
     statusLine,
   );
 }
 
-/** 社区资源镜像源面板（FR-18 修订）：官方 GitHub / Gitee / dsh-hub.cc 三选项。
- *  Phase 3 起插件市场 / Skill 中心按此取数；当前仅落设置框架，不影响任何下载。 */
+/** 社区资源镜像源面板（FR-18 修订）：官方 GitHub / Gitee / dsh-hub.cc 三选项，
+ *  插件市场 / Skill 中心按此取数。 */
 async function renderCommunityMirrorPanel(card: HTMLElement): Promise<void> {
   card.replaceChildren(el("h2", { class: "card__title" }, ["社区资源镜像源"]));
 
@@ -1149,9 +1089,6 @@ async function renderCommunityMirrorPanel(card: HTMLElement): Promise<void> {
   });
 
   card.append(
-    el("p", { class: "settings-path" }, [
-      "插件 / Skill 等社区资源的取数通道；Phase 3 起，插件市场与 Skill 中心按此设置取数，当前不影响任何下载。",
-    ]),
     el("div", { class: "settings-row" }, [el("span", {}, ["社区通道："]), select]),
     el("div", { class: "settings-row" }, [saveBtn, testBtn]),
     statusLine,
@@ -1206,27 +1143,9 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
   pane.append(
     el("section", { class: "card settings-card" }, [
       el("h2", { class: "card__title" }, ["全局 AGENTS.md"]),
-      el("p", { class: "settings-path" }, [
-        "对所有版本共享生效（保存即物化到各版本）；单个版本可在「版本设置 → 设置」覆盖——覆盖后该版本只用自己的内容，全局对它不再生效。",
-      ]),
+      el("p", { class: "settings-path" }, ["对所有版本共享生效；单个版本可在版本设置覆盖。"]),
       agentsArea,
       agentsStatus,
-    ]),
-  );
-
-  // 版本隔离（FR-17 · Phase 5 铺垫）
-  const isolationBox = el("input", { type: "checkbox", disabled: "" }) as HTMLInputElement;
-  isolationBox.checked = true;
-  pane.append(
-    el("section", { class: "card settings-card" }, [
-      el("h2", { class: "card__title" }, ["版本隔离"]),
-      el("div", { class: "settings-node-card" }, [
-        el("label", { class: "settings-field" }, [
-          isolationBox,
-          el("span", {}, ["启用实例隔离（插件 / 配置 / 会话 / 工作区随实例走）"]),
-        ]),
-        el("span", { class: "settings-path" }, ["Phase 5 交付：开关切换、影响说明与存量迁移引导。"]),
-      ]),
     ]),
   );
 
@@ -1244,7 +1163,6 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
         el("span", { class: "settings-badge settings-badge--ok" }, [`v${APP_VERSION}`]),
         el("span", { class: "settings-path" }, [`数据目录：${instancesDir}`]),
       ]),
-      el("p", { class: "settings-path" }, ["检查启动器更新在「更多」页提供（Phase 6）。"]),
     ]),
   );
 
@@ -1280,7 +1198,6 @@ async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
     return;
   }
   const statusLine = el("p", { class: "settings-status" }, [""]);
-  const configured = status.githubTokenConfigured || status.githubTokenEnvAuto;
   const tokenInput = el("input", {
     type: "password",
     class: "settings-input",
@@ -1300,7 +1217,7 @@ async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
       try {
         await setKey("github", value);
         tokenInput.value = KEY_MASK;
-        statusLine.textContent = "Token 已加密保存 ✓（市场与 Skill 目录的 API 配额即刻提升）";
+        statusLine.textContent = "Token 已加密保存（市场与 Skill 目录的 API 配额即刻提升）";
         statusLine.classList.remove("settings-status--error");
       } catch (err) {
         statusLine.textContent = `保存失败：${String(err)}`;
@@ -1333,11 +1250,7 @@ async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
     })();
   });
   card.append(
-    el("p", { class: "settings-path" }, [
-      configured
-        ? "已配置（保险库或环境变量）——GitHub 聚合走提额配额。"
-        : "未配置：市场/Skill 目录以匿名配额运行（60 次/小时），可能遇到限流提示；配置 Token 后大幅提升。",
-    ]),
+    el("p", { class: "settings-path" }, ["未配置时以匿名配额运行；配置后提升额度。"]),
     el("div", { class: "settings-row" }, [tokenInput, saveBtn, clearBtn]),
     statusLine,
   );
@@ -1347,14 +1260,11 @@ async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
 
 /** 设置·热键 = DSH 网页端原版快捷键的只读速查（2026-09-25 需求方裁决）：
  * 热键只有「DSH 网页端操作快捷键」一个含义，启动器不设自身快捷键；
- * DSH 键位硬编码、无配置机制，整页只读、无任何编辑控件。 */
+ * DSH 键位硬编码、无配置机制，整页只读、无任何编辑控件。
+ * 目录基线 = BASELINE_DSH_VERSION（BASELINE_VERIFIED_RANGE 实测一致，DSH 升级后复检），数据见 lib/dsh-hotkeys.ts。 */
 function renderHotkeysPane(pane: HTMLElement): void {
   pane.replaceChildren();
-  pane.append(
-    el("p", { class: "settings-path" }, [
-      `DSH 网页端（浏览器界面）的原版快捷键。键位由 DSH 本体决定，启动器不提供修改；目录基线 DSH ${BASELINE_DSH_VERSION}（${BASELINE_VERIFIED_RANGE} 实测一致，DSH 升级后复检）。`,
-    ]),
-  );
+  pane.append(el("p", { class: "settings-path" }, ["DSH 网页端原版快捷键（只读，由 DSH 本体决定）。"]));
   for (const group of DSH_HOTKEY_GROUPS) {
     const list = el("div", { class: "hotkey-list" }, []);
     for (const entry of DSH_HOTKEYS.filter((e) => e.group === group.id)) {

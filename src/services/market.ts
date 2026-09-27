@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：插件市场信息流与版本枚举（FR-03，T-4 口径）。 */
+import { invoke } from "./tauri";
 
 export interface MarketCard {
   name: string;
@@ -53,10 +54,7 @@ export interface VersionsReply {
 export type MarketSort = "hot" | "new";
 export type MarketSource = "all" | "npm" | "github" | "dshhub";
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 拉取插件市场信息流（排序/筛选在服务端应用；offline=true 时读离线快照）。 */
 export function fetchMarketFeed(params: {
@@ -77,6 +75,19 @@ export function fetchMarketFeed(params: {
  *  同时回带是否声明插件层。 */
 export function fetchMarketVersions(packageName: string): Promise<VersionsReply> {
   return invoke<VersionsReply>("market_versions", { package: packageName });
+}
+
+/** GitHub Release 摘要（git 直装卡详情页的「历代版本」）。 */
+export interface GithubRelease {
+  /** 与后端 ReleaseSummary（serde camelCase）的 tag_name 对应——勿写 tag。 */
+  tagName: string;
+  name: string;
+  publishedAt: string;
+  prerelease: boolean;
+}
+
+export function fetchGithubReleases(repo: string): Promise<GithubRelease[]> {
+  return invoke<GithubRelease[]>("market_github_releases", { repo });
 }
 
 /** 整合包栏信息流（聚合型资源目录：全家桶/聚合包/套件；P3 浏览层）。 */

@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：DSH 版本列表与实例安装（FR-01）。 */
+import { invoke } from "./tauri";
 
 export interface DshVersion {
   version: string;
@@ -24,10 +25,7 @@ export interface InstallOutcome {
   binJs: string;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 拉取可安装的 DSH 版本列表（semver 降序，latest 标注）。 */
 export function listDshVersions(): Promise<DshVersion[]> {

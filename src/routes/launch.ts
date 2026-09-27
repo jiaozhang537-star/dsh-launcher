@@ -1,5 +1,8 @@
 /** 启动页：厂商选择 + 方形头像 + key 两态输入 + 模型选择 + 启动大按钮 + 按需出现的运行状态区。 */
 import { el } from "../lib/dom";
+import { icon } from "../lib/icons";
+import { enterMsg } from "../lib/anim";
+import { showHint } from "../lib/hint";
 import { webEntryUrl } from "../lib/launch-decision";
 import { sortInstancesByRecency } from "../lib/instanceOrder";
 import { settledStageText, stepLevelOf, type StepLevel } from "../lib/launchSteps";
@@ -178,13 +181,13 @@ export const launchPage: PageDefinition = {
 
     // ===== 厂商区（默认 deepseek 直接呈现、零交互；目录内多于一个厂商才出现折叠）=====
     const pillText = el("span", { class: "vendor-switch__label" }, ["deepseek"]);
-    const pillChevron = el("span", { class: "vendor-switch__chevron", hidden: "" }, ["▾"]);
+    const pillChevron = el("span", { class: "vendor-switch__chevron", hidden: "" }, [icon("chevron-down", 14)]);
     const vendorPill = el(
       "button",
       { type: "button", class: "vendor-switch__pill" },
       [pillText, pillChevron],
     );
-    const vendorList = el("div", { class: "vendor-switch__list", hidden: "" }, []);
+    const vendorList = el("div", { class: "vendor-switch__list" }, []);
     vendorPill.addEventListener("click", () => {
       if (!vendorFoldable()) return;
       toggleFloatingList(vendorList, vendorPill, identityMain);
@@ -212,7 +215,7 @@ export const launchPage: PageDefinition = {
       readonly: "",
       placeholder: "默认模型",
     });
-    const modelList = el("div", { class: "model-select__list", hidden: "" }, []);
+    const modelList = el("div", { class: "model-select__list" }, []);
     let currentModel = "";
     /** 实例当前默认模型的提供方 id（agent-default-model.provider，空 = 老实例没写）。 */
     let currentProvider = "";
@@ -236,7 +239,7 @@ export const launchPage: PageDefinition = {
           keyInput.value = KEY_MASK;
           keyInput.placeholder = "";
           vendorPill.classList.add("vendor-switch__pill--configured");
-          noteKey("已保存并同步到「设置页 · 模型厂商」✓");
+          noteKey("已保存并同步到「设置页 · 模型厂商」");
           // 后台同步最新状态；失败不影响已显示的掩码态。状态可信时与保险库
           // 对账（P3-01）：权威已无 Key 的会话标记被撤销。
           const fresh = await getStatus().catch(() => null);
@@ -314,7 +317,7 @@ export const launchPage: PageDefinition = {
     async function noteModelOwner(): Promise<void> {
       if (!currentModel) return;
       if (!currentProvider) {
-        noteKey(`默认模型「${currentModel}」缺提供方标记——重新点一次该模型即可补全`, true);
+        noteKey(`模型「${currentModel}」缺少提供方标记`, true);
         return;
       }
       const activeKey = await routeKeyOf(activeVendorId);
@@ -388,12 +391,9 @@ export const launchPage: PageDefinition = {
         modelInput.value = model;
         closeFloatingList(modelList, modelInput);
         if (provider) {
-          noteKey(`「${model}」已记录为该实例默认模型（提供方 ${provider}）—— 下次启动生效 ✓`);
+          noteKey(`「${model}」已记录为该实例默认模型（提供方 ${provider}）—— 下次启动生效`);
         } else {
-          noteKey(
-            `「${activeEntry()?.label ?? activeVendorId}」的接口形态在 DSH 配置协议里没有对应者，该模型进不了实例——改用 OpenAI 兼容地址`,
-            true,
-          );
+          noteKey("该模型接口形态不兼容，无法写入实例", true);
         }
       } catch (err) {
         noteKey(`保存失败：${String(err).slice(0, 160)}`, true);
@@ -460,9 +460,10 @@ export const launchPage: PageDefinition = {
       list.style.maxHeight = `${Math.max(least, Math.min(wanted, room))}px`;
     }
 
-    /** 展开/收起浮动列表（收起 = 隐藏 + 去掉浮层定位，回到普通隐藏态）。 */
+    /** 展开/收起浮动列表（收起 = 摘掉 .is-open + 去掉浮层定位，回到隐藏态；
+     *  R5：显隐走 class 过渡 100ms，不再 hidden 硬切）。 */
     function toggleFloatingList(list: HTMLElement, trigger: HTMLElement, floor: HTMLElement): void {
-      if (list.hidden) {
+      if (!list.classList.contains("is-open")) {
         openFloatingList(list, trigger, floor);
       } else {
         closeFloatingList(list, trigger);
@@ -473,14 +474,14 @@ export const launchPage: PageDefinition = {
       // 先渲染内容再量高度：行高由真实行决定，空列表量不出上限。
       if (list === vendorList) renderVendorList();
       else renderModelList();
-      list.hidden = false;
       list.classList.add("is-floating");
       capFloatingList(list, trigger, floor);
+      list.classList.add("is-open");
       if (list === vendorList) pillChevron.classList.add("is-open");
     }
 
     function closeFloatingList(list: HTMLElement, trigger: HTMLElement): void {
-      list.hidden = true;
+      list.classList.remove("is-open");
       list.classList.remove("is-floating");
       list.style.maxHeight = "";
       if (list === vendorList) pillChevron.classList.remove("is-open");
@@ -489,15 +490,15 @@ export const launchPage: PageDefinition = {
 
     /** 窗口尺寸变化时重算浮层上限与字幕对齐（两者都取决于当前可用空白）。 */
     function relayoutFloatingLists(): void {
-      if (!vendorList.hidden) capFloatingList(vendorList, vendorPill, identityMain);
-      if (!modelList.hidden) capFloatingList(modelList, modelInput, launchArea);
+      if (vendorList.classList.contains("is-open")) capFloatingList(vendorList, vendorPill, identityMain);
+      if (modelList.classList.contains("is-open")) capFloatingList(modelList, modelInput, launchArea);
       if (starting) syncRoll();
     }
 
     /** 收起所有浮层（点击别处 / Esc）。 */
     function closeFloatingLists(): void {
-      if (!vendorList.hidden) closeFloatingList(vendorList, vendorPill);
-      if (!modelList.hidden) closeFloatingList(modelList, modelInput);
+      if (vendorList.classList.contains("is-open")) closeFloatingList(vendorList, vendorPill);
+      if (modelList.classList.contains("is-open")) closeFloatingList(modelList, modelInput);
     }
 
     function renderVendorArea(): void {
@@ -532,7 +533,7 @@ export const launchPage: PageDefinition = {
         keyInput.placeholder = "sk-";
       }
       // 模型选择框跟随厂商与实例。
-      modelList.hidden = true;
+      modelList.classList.remove("is-open");
       void refreshModelState();
       if (vendorFoldable()) renderVendorList();
     }
@@ -1140,10 +1141,30 @@ export const launchPage: PageDefinition = {
         overlay.hidden = true;
         return;
       }
+      const firstShow = overlay.hidden;
       overlay.hidden = false;
       overlay.querySelector(".error-modal__title")!.textContent = errorModal.title;
       const body = overlay.querySelector(".error-modal__body")!;
       body.replaceChildren(...errorModal.lines.map((line) => el("div", { class: "error-modal__line" }, [line])));
+      // G8 延伸设计（spec §6「错误详情」行）：详细信息折叠 + 复制。errorModal.lines
+      // 就是该错误的全部文本来源（诊断卡/退出原因），折叠区与复制共用同一份。
+      const detailText = errorModal.lines.join("\n");
+      const copyBtn = el("button", { type: "button", class: "btn btn--muted" }, ["复制"]);
+      copyBtn.addEventListener("click", (event) => {
+        // 复制键在 summary 行内：不触发折叠开合（summary 点击的默认行为）。
+        event.preventDefault();
+        event.stopPropagation();
+        navigator.clipboard?.writeText(detailText).then(
+          () => showHint("已复制错误信息"),
+          (err) => console.error("复制错误信息失败", err),
+        );
+      });
+      body.append(
+        el("details", { class: "error-detail" }, [
+          el("summary", {}, ["详细信息", copyBtn]),
+          el("pre", { class: "error-detail__body" }, [detailText]),
+        ]),
+      );
       const foot = overlay.querySelector(".error-modal__btns")!;
       foot.replaceChildren();
       if (errorModal.canForce) {
@@ -1183,6 +1204,8 @@ export const launchPage: PageDefinition = {
         renderErrorModal();
       });
       foot.append(ok);
+      // 弹窗入场（spec §5 MyMsg：Y40→0 300ms OutBack）——只在由隐转现那一次播。
+      if (firstShow) enterMsg(overlay.querySelector<HTMLElement>(".error-modal")!);
     }
 
     function renderLogModal(): void {
@@ -1190,6 +1213,7 @@ export const launchPage: PageDefinition = {
         logModal.hidden = true;
         return;
       }
+      const firstShow = logModal.hidden;
       const lines = consoleLines.get(logModalId) ?? [];
       const cards = (diagCards.get(logModalId) ?? []).map(cardLine);
       logModalTitle.textContent = `运行日志 — ${nameOf(logModalId)}`;
@@ -1203,6 +1227,7 @@ export const launchPage: PageDefinition = {
       );
       logModalBody.scrollTop = logModalBody.scrollHeight;
       logModal.hidden = false;
+      if (firstShow) enterMsg(logModal.querySelector<HTMLElement>(".log-modal__card")!);
     }
 
     // ===== 初始化 =====
@@ -1339,7 +1364,7 @@ export const launchPage: PageDefinition = {
     ]);
 
     // 详细日志弹窗：白底等宽文本，仅从悬浮卡「日志」进入；主页永不直接展示。
-    const logModalClose = el("button", { type: "button", class: "log-modal__close", title: "关闭" }, ["✕"]);
+    const logModalClose = el("button", { type: "button", class: "log-modal__close", title: "关闭" }, [icon("x", 14)]);
     logModalClose.addEventListener("click", () => {
       logModalId = null;
       renderLogModal();

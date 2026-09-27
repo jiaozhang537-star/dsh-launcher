@@ -1,11 +1,12 @@
 /** 下载页「Skill」分区（FR-14）：与插件市场同级的资源分类，共用 PCL 搜索
  * Mod 布局（搜索大卡 + 列表卡 + 热度/最新 tab）。Skill 与插件本质不同
- * （T-4 定稿）：是 `<name>/SKILL.md` 文件布局而非 npm 包——折叠展开没有
- * 版本维度，展开即「安装技能（整仓库）」；安装落点 `<实例>/skills/<name>/`，
- * DSH 自带目录 watcher，下次启动实例即被发现。 */
+ * （T-4 定稿）：是 `<name>/SKILL.md` 文件布局而非 npm 包——无版本维度，
+ * 详情页操作行即「安装技能（整仓库）」；安装落点 `<实例>/skills/<name>/`，
+ * DSH 自带目录 watcher，下次启动实例即被发现。返工 W：点行进详情二级页。 */
 import { el } from "../lib/dom";
 import { fetchSkillFeed, skillInstall, type SkillCard, type SkillFeed } from "../services/skills";
-import { cardIcon, fmtCount, openInstanceChooser, relTime } from "./market-shared";
+import { cardIcon, fmtCount, metaItem, openInstanceChooser, relTime } from "./market-shared";
+import { openMarketDetail } from "./market-detail";
 
 /** 排序：hot = 星标降序；new = 更新时间降序（空殿后）。 */
 type SkillSort = "hot" | "new";
@@ -31,7 +32,6 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
   let feed: SkillFeed | null = null;
   let loading = false;
   let loadError = "";
-  const expanded = new Set<string>();
 
   // ── 搜索大卡片（与插件分区同布局；Skill 来源当前仅 GitHub 聚合）──
   const keywordEl = el("input", { type: "text", class: "settings-input", placeholder: "搜索技能名称或描述…" });
@@ -47,7 +47,6 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
     sourceSel.append(o);
   }
   sourceSel.value = "all";
-  sourceSel.title = "技能分发源当前为 GitHub `dsh-skill` 话题聚合（T-4 裁决）";
   const searchBtn = el("button", { type: "button", class: "btn btn--ghost" }, ["搜索"]);
   const resetBtn = el("button", { type: "button", class: "btn btn--line" }, ["重置条件"]);
 
@@ -56,7 +55,6 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
     el("div", { class: "market-search" }, [
       el("div", { class: "market-field" }, [el("span", {}, ["名称"]), keywordEl]),
       el("div", { class: "market-field" }, [el("span", {}, ["来源"]), sourceSel]),
-      el("div", { class: "market-field" }, [el("span", {}, ["分类"]), el("span", { class: "settings-path" }, ["技能为文件布局（SKILL.md），无类型体系"])]),
       el("div", { class: "market-actions" }, [searchBtn, resetBtn]),
     ]),
   ]);
@@ -82,38 +80,12 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
     statusLine,
   ]);
 
-  /** 元信息行：★ 星标 · ↑ 更新 · ◎ GitHub。 */
+  /** 元信息行（R1：字符图标换 metaItem 小图标结构）：星标 · 更新 · GitHub。 */
   function metaLine(card: SkillCard): HTMLElement {
     return el("div", { class: "mk-meta" }, [
-      [`★ ${fmtCount(card.stars)}`, `↑ ${relTime(card.updatedAt)}`, "◎ GitHub"].join("  ·  "),
-    ]);
-  }
-
-  function chooseAndInstall(card: SkillCard): void {
-    openInstanceChooser({
-      statusLine,
-      describe: (inst) => ({ disabled: false, note: inst.dshVersion ? `DSH ${inst.dshVersion} · :${inst.port ?? "-"}` : "未安装 DSH 本体（技能仍可先装）" }),
-      run: (inst) =>
-        skillInstall(inst.id, card.repo).then((outcome) => {
-          if (outcome.overwritten) {
-            return `已覆盖安装技能 ${outcome.installed.join("、")} 到「${inst.name}」（${outcome.targetDir}）——下次启动实例时生效`;
-          }
-          return `已安装 ${outcome.installed.length} 个技能（${outcome.installed.join("、")}）到「${inst.name}」——下次启动实例时生效`;
-        }),
-    });
-  }
-
-  function buildExpand(card: SkillCard): HTMLElement {
-    const btn = el("button", { type: "button", class: "btn btn--ghost ver-act" }, ["安装技能（整仓库）"]);
-    btn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      chooseAndInstall(card);
-    });
-    return el("div", { class: "mk-expand" }, [
-      el("p", { class: "settings-status" }, [
-        "技能以仓库为整体安装：扫描根级/一级子目录的 SKILL.md，装入实例 skills 目录（同名覆盖、可重复安装）。",
-      ]),
-      el("div", { class: "mk-expand__acts" }, [btn]),
+      metaItem("star", fmtCount(card.stars)),
+      metaItem("arrow-up", relTime(card.updatedAt)),
+      metaItem("globe", "GitHub"),
     ]);
   }
 
@@ -129,25 +101,30 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
         metaLine(card),
       ]),
     ]);
-    let expand: HTMLElement | null = null;
-    row.addEventListener("click", () => {
-      if (expand) {
-        expand.remove();
-        expand = null;
-        row.classList.remove("mk-row--open");
-        expanded.delete(card.repo);
-        return;
-      }
-      expand = buildExpand(card);
-      expanded.add(card.repo);
-      row.classList.add("mk-row--open");
-      row.append(expand);
-    });
-    if (expanded.has(card.repo)) {
-      expand = buildExpand(card);
-      row.append(expand);
-      row.classList.add("mk-row--open");
-    }
+    row.addEventListener("click", () => openMarketDetail({
+      kind: "skill",
+      name: card.name,
+      subName: card.subName,
+      iconUrl: card.iconUrl,
+      tags: [],
+      description: card.description,
+      meta: metaLine(card),
+      displayName: `${card.name} (${card.subName})`,
+      repo: card.repo,
+      installDirect: (statusLine) => {
+        openInstanceChooser({
+          statusLine,
+          describe: (inst) => ({ disabled: false, note: inst.dshVersion ? `DSH ${inst.dshVersion} · :${inst.port ?? "-"}` : "未安装 DSH 本体（技能仍可先装）" }),
+          run: (inst) =>
+            skillInstall(inst.id, card.repo).then((outcome) => {
+              if (outcome.overwritten) {
+                return `已覆盖安装技能 ${outcome.installed.join("、")} 到「${inst.name}」（${outcome.targetDir}）——下次启动实例时生效`;
+              }
+              return `已安装 ${outcome.installed.length} 个技能（${outcome.installed.join("、")}）到「${inst.name}」——下次启动实例时生效`;
+            }),
+        });
+      },
+    }));
     return row;
   }
 

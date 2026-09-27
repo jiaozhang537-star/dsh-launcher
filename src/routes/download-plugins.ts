@@ -1,25 +1,13 @@
 /** 下载页「插件」分区（FR-03）：PCL 搜索 Mod 布局——右侧顶部「搜索」大卡片
  * （名称/来源/类型 + 搜索/重置条件），下方列表卡片右上角「热度 / 最新」tab
  * （默认热度=推荐流；搜索时熄灭、按相关度排序）；条目行 = 图标 + 名称｜副名 +
- * 标签徽章 + 摘要 + 元信息行；折叠展开历史版本小卡（头像+版本 / 周下载·更新·
- * 来源小字），悬浮右缘浮现下载图标——点击直接装进**当前实例**并启用（不弹
- * 实例选择框，需求方走查定稿），行内显示安装中/已启用状态。
+ * 标签徽章 + 摘要 + 元信息行；**点行进详情二级页**（market-detail：信息卡 +
+ * 全部版本 + 逐版本直装当前实例，对齐 PCL「点行进详情」交互，返工 W）。
  * 安装走官方 `dsh plugin add` 链，按拍板时序语义提示「下次启动实例时生效」。 */
 import { el } from "../lib/dom";
-import { getSelectedInstance } from "../lib/selected-instance";
-import { sortInstancesByRecency } from "../lib/instanceOrder";
-import {
-  fetchMarketFeed,
-  fetchMarketVersions,
-  type MarketCard,
-  type MarketFeed,
-  type MarketSource,
-  type MarketVersion,
-  type VersionsReply,
-} from "../services/market";
-import { pluginInstall } from "../services/plugins";
-import { listInstances, type Instance } from "../services/instances";
-import { cardIcon, fmtCount, relTime } from "./market-shared";
+import { fetchMarketFeed, type MarketCard, type MarketFeed, type MarketSource } from "../services/market";
+import { buildMetaLine, cardIcon } from "./market-shared";
+import { openMarketDetail } from "./market-detail";
 
 const SOURCE_OPTIONS: { value: MarketSource; label: string }[] = [
   { value: "all", label: "全部" },
@@ -43,43 +31,6 @@ export const KIND_OPTIONS: { value: string; label: string }[] = [
   { value: "其他", label: "其他" },
 ];
 
-const SOURCE_LABELS: Record<MarketCard["source"], string> = {
-  npm: "npm",
-  github: "GitHub",
-  dshhub: "dsh-hub",
-};
-
-  /** 作者名：repo owner 段或 scoped 包名的 @scope 段；取不到为空串。 */
-  function authorOf(card: MarketCard): string {
-    if (card.repo) return card.repo.split("/")[0] ?? "";
-    const npm = card.npmName ?? "";
-    return npm.startsWith("@") ? npm.slice(1).split("/")[0] ?? "" : "";
-  }
-
-  /** 元信息行：作者 · 版本 · 下载 · 更新 · 来源（+星标/验证标记）。 */
-  function metaLine(card: MarketCard): HTMLElement {
-    const parts: string[] = [];
-    const author = authorOf(card);
-    if (author) parts.push(`✎ ${author}`);
-    if (card.latestVersion) parts.push(`v${card.latestVersion}`);
-    if (card.monthlyDownloads !== null) parts.push(`⬇ ${fmtCount(card.monthlyDownloads)}/月`);
-    else if (card.stars !== null) parts.push(`★ ${fmtCount(card.stars)}`);
-    else parts.push("⬇ 未知");
-    parts.push(`↑ ${relTime(card.updatedAt)}`);
-    parts.push(`◎ ${SOURCE_LABELS[card.source]}`);
-    const line = el("div", { class: "mk-meta" }, [parts.join("  ·  ")]);
-    if (card.verified === true) line.append(el("span", { class: "mk-verified" }, ["✔ 已验证"]));
-    return line;
-  }
-
-/** 下载图标（需求方定稿：向下箭头+底部横线），跟随文字色、悬浮态跟随按钮。 */
-function downloadIcon(): HTMLElement {
-  const span = el("span", { class: "mk-dl-icon", "aria-hidden": "true" });
-  span.innerHTML =
-    '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg>';
-  return span;
-}
-
 export function renderMarketSection(container: HTMLElement): HTMLElement {
   // ── 状态 ──
   // 排序三态：relevance（关键词搜索的相关度序，两个 tab 均熄灭——需求方
@@ -90,8 +41,6 @@ export function renderMarketSection(container: HTMLElement): HTMLElement {
   let feed: MarketFeed | null = null;
   let loading = false;
   let loadError = "";
-  const expanded = new Set<string>(); // 已展开的条目键（重渲染后恢复）
-  const versionCache = new Map<string, VersionsReply>();
 
   // ── 搜索大卡片（PCL「搜索 Mod」布局）──
   const keywordEl = el("input", { type: "text", class: "settings-input", placeholder: "搜索插件名称或描述…" });
@@ -165,190 +114,7 @@ export function renderMarketSection(container: HTMLElement): HTMLElement {
     statusLine,
   ]);
 
-  // ── 安装（需求方走查定稿）：点下载图标直接装进**当前实例**（不弹选择框），
-  // 行内显示 安装中/已启用/失败 状态；「启用」= 装入 profile + bundles 层
-  // （DSH 原生无启停开关，T-2：下次启动实例即生效）。 ──
-  const installStates = new Map<string, { phase: "installing" | "done" | "failed"; detail: string }>();
-
-  /** 当前实例解析：显式选择 > 最近使用（launch 页同口径）> 唯一实例。
-   *  内存单例重启即空——不能因此拒绝安装（走查实证的误报场景）。 */
-  async function resolveCurrentInstance(): Promise<Instance | null> {
-    const instances = await listInstances();
-    if (instances.length === 0) return null;
-    const selectedId = getSelectedInstance();
-    if (selectedId) {
-      const picked = instances.find((i) => i.id === selectedId);
-      if (picked) return picked;
-    }
-    return sortInstancesByRecency(instances)[0] ?? null;
-  }
-
-  function installToCurrent(card: MarketCard, version: string | null, onSettled: () => void): void {
-    const spec = version ? `${card.npmName}@${version}` : `github:${card.repo}`;
-    statusLine.classList.remove("mk-status--error");
-    statusLine.textContent = "正在确定目标实例…";
-    void (async () => {
-      const inst = await resolveCurrentInstance();
-      if (!inst) {
-        statusLine.classList.add("mk-status--error");
-        statusLine.textContent = "还没有任何实例——先到「下载 · dsh 版本」创建一个，再回来安装。";
-        return;
-      }
-      installStates.set(spec, { phase: "installing", detail: "" });
-      onSettled();
-      // 打标发起的 spec：downloads 页全局进度行按它各归各（审查 R1）。
-      statusLine.dataset.spec = spec;
-      statusLine.textContent = `正在安装 ${spec} 到「${inst.name}」…`;
-      try {
-        const outcome = await pluginInstall(inst.id, spec);
-        installStates.set(spec, { phase: "done", detail: outcome.version });
-        statusLine.textContent =
-          `✓ ${outcome.packageName} ${outcome.version} 已安装到「${inst.name}」并启用` +
-          `——下次启动该实例时生效（首次启动可能稍慢）`;
-      } catch (err) {
-        installStates.set(spec, { phase: "failed", detail: String(err).slice(0, 160) });
-        statusLine.classList.add("mk-status--error");
-        statusLine.textContent = `安装失败：${String(err).slice(0, 260)}`;
-      }
-      onSettled();
-    })();
-  }
-
-  /** 版本行小卡（走查定稿）：上=头像+版本号（悬浮右缘浮现下载图标），
-   *  下=周下载 · 更新时间 · 来源；行内状态：安装中/已安装并启用/失败。
-   *  declaresBundle=false（依赖库冒充插件）→ 无下载图标（源头拦截）。 */
-  function versionRow(
-    card: MarketCard,
-    v: MarketVersion,
-    declaresBundle: boolean,
-    onSettled: () => void,
-  ): HTMLElement {
-    const spec = `${card.npmName}@${v.version}`;
-    const row = el("div", { class: "mk-ver-card" }, []);
-    const state = installStates.get(spec);
-
-    const acts = el("div", { class: "mk-ver-card__acts" }, []);
-    if (!declaresBundle) {
-      acts.append(el("span", { class: "mk-ver-state" }, ["依赖库·禁装"]));
-    } else if (state?.phase === "installing") {
-      acts.append(el("span", { class: "mk-ver-state" }, ["⏳ 安装中…"]));
-    } else {
-      if (state?.phase === "done") {
-        acts.append(el("span", { class: "mk-ver-state mk-ver-state--done" }, ["✓ 已安装并启用"]));
-      } else if (state?.phase === "failed") {
-        acts.append(
-          el("span", { class: "mk-ver-state mk-ver-state--error", title: state.detail }, ["✗ 失败（悬浮点 ⬇ 重试）"]),
-        );
-      }
-      const dl = el("button", { type: "button", class: "ver-act mk-ver-dl", title: "下载并安装到当前实例" }, []);
-      dl.append(downloadIcon());
-      dl.addEventListener("click", (event) => {
-        event.stopPropagation();
-        installToCurrent(card, v.version, onSettled);
-      });
-      acts.append(dl);
-    }
-
-    row.append(
-      el("div", { class: "mk-ver-card__main" }, [
-        cardIcon(card.iconUrl, card.name),
-        el("span", { class: "ver-row__main" }, [`v${v.version}`]),
-        v.latest ? el("span", { class: "mk-badge mk-badge--latest" }, ["最新"]) : document.createDocumentFragment(),
-        acts,
-      ]),
-      el("div", { class: "mk-ver-card__sub" }, [
-        `${v.weeklyDownloads !== null ? `周下载 ${fmtCount(v.weeklyDownloads)}` : "周下载 --"} · ${relTime(v.publishedAt)} · npm`,
-      ]),
-    );
-    return row;
-  }
-
-  /** 展开区的版本列表（npm 卡 = 历史版本小卡；git 卡 = 直装说明）。 */
-  function buildExpand(card: MarketCard): HTMLElement {
-    const box = el("div", { class: "mk-expand" }, []);
-    if (card.npmName) {
-      const render = (reply: VersionsReply): void => paintVersions(box, card, reply);
-      const cached = versionCache.get(card.npmName);
-      if (cached) {
-        render(cached);
-      } else {
-        box.append(el("p", { class: "settings-status" }, ["版本列表加载中…"]));
-        void fetchMarketVersions(card.npmName)
-          .then((reply) => {
-            versionCache.set(card.npmName!, reply);
-            if (box.isConnected) render(reply);
-          })
-          .catch((err) => {
-            if (box.isConnected) {
-              box.replaceChildren(
-                el("p", { class: "settings-status settings-status--error" }, [
-                  `版本列表拉取失败：${String(err).slice(0, 240)}`,
-                ]),
-              );
-            }
-          });
-      }
-    } else {
-      // git 直装形态：未发布 npm，按 GitHub 仓库安装（pnpm git 语义）。
-      const spec = `github:${card.repo ?? ""}`;
-      const state = installStates.get(spec);
-      const acts = el("div", { class: "mk-ver-card__acts" }, []);
-      if (state?.phase === "installing") {
-        acts.append(el("span", { class: "mk-ver-state" }, ["⏳ 安装中…"]));
-      } else {
-        if (state?.phase === "done") {
-          acts.append(el("span", { class: "mk-ver-state mk-ver-state--done" }, ["✓ 已安装并启用"]));
-        } else if (state?.phase === "failed") {
-          acts.append(el("span", { class: "mk-ver-state mk-ver-state--error", title: state.detail }, ["✗ 失败"]));
-        }
-        const dl = el("button", { type: "button", class: "ver-act mk-ver-dl", title: "下载并安装到当前实例" }, []);
-        dl.append(downloadIcon());
-        dl.addEventListener("click", (event) => {
-          event.stopPropagation();
-          installToCurrent(card, null, () => {
-            if (box.isConnected) buildExpandInto(box, card);
-          });
-        });
-        acts.append(dl);
-      }
-      box.append(
-        el("p", { class: "settings-status" }, [
-          "未发布 npm——git 直装（经仓库构建，首次安装较慢；如遇 pnpm 构建拦截按输出提示操作）。",
-        ]),
-        acts,
-      );
-    }
-    return box;
-  }
-
-  /** 原位重建展开区（安装状态变化后保持展开与滚动位置大致不变）。 */
-  function buildExpandInto(box: HTMLElement, card: MarketCard): void {
-    const fresh = buildExpand(card);
-    box.replaceWith(fresh);
-  }
-
-  function paintVersions(box: HTMLElement, card: MarketCard, reply: VersionsReply): void {
-    const versions = reply.versions;
-    const list = el("div", { class: "mk-expand__list" }, []);
-    for (const v of versions) {
-      list.append(versionRow(card, v, reply.declaresBundle, () => {
-        if (box.isConnected) paintVersions(box, card, reply);
-      }));
-    }
-    const head = el("p", { class: "settings-status" }, [`历史版本（${versions.length}）——按周下载挑甜点：`]);
-    if (!reply.declaresBundle) {
-      // 源头拦截（走查定稿）：任一版本都没声明 dsh.bundle.patch = 依赖库
-      // 冒充插件（keywords 乱打的典型），安装入口整体禁用。
-      head.append(
-        el("span", { class: "mk-ver-state mk-ver-state--error" }, [
-          "　⚠ 该包未声明 dsh.bundle.patch——是依赖库而非可加载的插件，已禁用安装。",
-        ]),
-      );
-    }
-    box.replaceChildren(head, list);
-  }
-
-  /** 一张可折叠的插件条目行。 */
+  /** 卡片行：点行进详情二级页（PCL 交互）。 */
   function cardRow(card: MarketCard): HTMLElement {
     const row = el("div", { class: "mk-row" }, [
       cardIcon(card.iconUrl, card.name),
@@ -361,30 +127,21 @@ export function renderMarketSection(container: HTMLElement): HTMLElement {
           ...card.tags.map((t) => el("span", { class: "mk-badge" }, [t])),
         ]),
         card.description ? el("div", { class: "mk-row__desc" }, [card.description]) : document.createDocumentFragment(),
-        metaLine(card),
+        buildMetaLine(card),
       ]),
     ]);
-    let expand: HTMLElement | null = null;
-    const key = card.npmName ?? card.repo ?? card.name;
-    row.addEventListener("click", () => {
-      if (expand) {
-        expand.remove();
-        expand = null;
-        row.classList.remove("mk-row--open");
-        expanded.delete(key);
-        return;
-      }
-      expand = buildExpand(card);
-      expanded.add(key);
-      row.classList.add("mk-row--open");
-      row.append(expand);
-    });
-    // 重渲染后恢复已展开状态。
-    if (expanded.has(key)) {
-      expand = buildExpand(card);
-      row.append(expand);
-      row.classList.add("mk-row--open");
-    }
+    row.addEventListener("click", () => openMarketDetail({
+      kind: "plugin",
+      name: card.name,
+      subName: card.subName,
+      iconUrl: card.iconUrl,
+      tags: card.tags,
+      description: card.description,
+      meta: buildMetaLine(card),
+      displayName: card.subName && card.subName !== card.name ? `${card.name} (${card.subName})` : card.name,
+      repo: card.repo,
+      marketCard: card,
+    }));
     return row;
   }
 

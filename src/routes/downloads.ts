@@ -1,4 +1,6 @@
-import { el } from "../lib/dom";
+import { collapseArrow, el } from "../lib/dom";
+import { collapseToggle, enterItems } from "../lib/anim";
+import { icon } from "../lib/icons";
 import { uniqueInstanceName } from "../lib/instanceOrder";
 
 /** 版本图标：DSH 鲸鱼标装进正方形小框（与版本选择页共用素材）。 */
@@ -10,7 +12,7 @@ function versionIcon(): HTMLElement {
     draggable: "false",
   });
 }
-import type { PageDefinition } from "../router";
+import { navigate, type PageDefinition } from "../router";
 import { createInstance, listInstances } from "../services/instances";
 import {
   installDsh,
@@ -18,12 +20,8 @@ import {
   onInstallProgress,
   type DshVersion,
 } from "../services/dshInstall";
-import { getTask, getTasks, progressMatchesSpec, recordProgress, subscribeTasks, updateTask, upsertTask, type DownloadTask } from "../lib/downloadTasks";
-import {
-  cancelSourceDownload,
-  downloadSourceArchive,
-  openSourceDir,
-} from "../services/sourceArchive";
+import { getTask, progressMatchesSpec, recordProgress, updateTask, upsertTask, type DownloadTask } from "../lib/downloadTasks";
+import { downloadSourceArchive } from "../services/sourceArchive";
 import { onPluginProgress } from "../services/plugins";
 import { onSkillProgress } from "../services/skills";
 import { renderMarketSection } from "./download-plugins";
@@ -41,7 +39,7 @@ function sourceTaskKey(version: string, instanceId: string | null): string {
   return `${SOURCE_KEY_PREFIX}${instanceId ?? "global"}-${version}`;
 }
 
-function parseSourceTaskKey(key: string): { version: string; instanceId: string | null } | null {
+export function parseSourceTaskKey(key: string): { version: string; instanceId: string | null } | null {
   if (!key.startsWith(SOURCE_KEY_PREFIX)) return null;
   const rest = key.slice(SOURCE_KEY_PREFIX.length);
   const sep = rest.lastIndexOf("-");
@@ -56,8 +54,8 @@ function parseSourceTaskKey(key: string): { version: string; instanceId: string 
  */
 let eventDisposers: (() => void)[] = [];
 let downloadsEventsReleased = false;
-/** 任务区订阅与秒级刷新定时器：模块级单例，attachTaskArea 重置、unmount 清理。 */
-let taskAreaUnsub: (() => void) | null = null;
+/** 下载页分区记忆（模块级）：详情页 ← 返回时恢复离开时的分区。 */
+let lastDlCategory: DlCategory = "dsh";
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 
 function trackDownloadsEvent(unlisten: Promise<() => void>): void {
@@ -75,13 +73,9 @@ function releaseDownloadsEvents(): void {
     clearInterval(tickTimer);
     tickTimer = null;
   }
-  if (taskAreaUnsub) {
-    taskAreaUnsub();
-    taskAreaUnsub = null;
-  }
 }
 
-function isSourceTask(task: DownloadTask): boolean {
+export function isSourceTask(task: DownloadTask): boolean {
   return task.instanceId.startsWith(SOURCE_KEY_PREFIX);
 }
 
@@ -95,14 +89,14 @@ function displayName(version: string): string {
   return `dsh-${version}`;
 }
 
-function fmtBytes(n: number): string {
+export function fmtBytes(n: number): string {
   if (n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
   const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
   return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-function fmtElapsed(startedAt: number): string {
+export function fmtElapsed(startedAt: number): string {
   const secs = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
   const m = Math.floor(secs / 60);
   const s = secs % 60;
@@ -110,95 +104,8 @@ function fmtElapsed(startedAt: number): string {
 }
 
 /** 任务卡的进度描述：每个阶段都说清「在干嘛 + 到哪了」。 */
-function taskLineText(task: DownloadTask): string {
-  switch (task.phase) {
-    case "prepare":
-      return "准备中（校验实例与运行时）";
-    case "node": {
-      if (task.total > 0) {
-        const pct = Math.min(100, Math.round((task.received / task.total) * 100));
-        const speed = task.speed ? ` · ${fmtBytes(task.speed)}/s` : "";
-        return `下载 Node 运行时 ${pct}%${speed} · ${fmtBytes(task.received)} / ${fmtBytes(task.total)}`;
-      }
-      return task.detail || "准备下载 Node 运行时…";
-    }
-    case "source": {
-      if (task.total > 0) {
-        const pct = Math.min(100, Math.round((task.received / task.total) * 100));
-        const speed = task.speed ? ` · ${fmtBytes(task.speed)}/s` : "";
-        return `下载源码归档 ${pct}%${speed} · ${fmtBytes(task.received)} / ${fmtBytes(task.total)}`;
-      }
-      return task.detail || "准备下载源码归档…";
-    }
-    case "install":
-      return `${task.channel ? `${task.channel} · ` : ""}${fmtElapsed(task.startedAt)}${
-        task.detail ? ` · ${task.detail}` : ""
-      }`;
-    case "verify":
-      return "校验安装产物…";
-    case "done":
-      return isSourceTask(task)
-        ? "源码归档完成 ✓（已解压，可打开目录查看）"
-        : "完成 ✓（可在「启动」页选择该实例）";
-    case "failed":
-      return `失败：${task.detail}`;
-  }
-}
-
-/** 就地把一张任务卡刷成最新状态（不重建节点，保住悬停/焦点）。 */
-function paintTaskCard(card: HTMLElement, task: DownloadTask): void {
-  const line = card.querySelector(".task-line");
-  if (line) {
-    line.textContent = taskLineText(task);
-    line.classList.toggle("settings-status--error", task.status === "failed");
-  }
-  const bar = card.querySelector(".task-bar");
-  if (bar instanceof HTMLElement) {
-    const fill = bar.firstElementChild as HTMLElement | null;
-    const showBar = (task.phase === "node" || task.phase === "source") && task.total > 0;
-    bar.hidden = !showBar;
-    if (fill && showBar) {
-      fill.style.width = `${Math.min(100, Math.round((task.received / task.total) * 100))}%`;
-    }
-  }
-  card.classList.toggle("download-task--done", task.status === "done");
-  card.classList.toggle("download-task--failed", task.status === "failed");
-  const actions = card.querySelector(".task-actions");
-  if (actions) {
-    actions.replaceChildren();
-    if (task.status === "failed") {
-      const retry = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["重试此任务"]);
-      retry.addEventListener("click", () => {
-        if (isSourceTask(task)) {
-          const parsed = parseSourceTaskKey(task.instanceId);
-          void startSourceDownload(parsed?.version ?? task.version, parsed?.instanceId ?? null);
-        } else {
-          void startInstall(task.instanceId, task.name, task.version);
-        }
-      });
-      actions.append(retry);
-    } else if (task.status === "done" && isSourceTask(task)) {
-      const open = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["打开源码目录"]);
-      open.addEventListener("click", () => {
-        const parsed = parseSourceTaskKey(task.instanceId);
-        void openSourceDir(parsed?.version ?? task.version, parsed?.instanceId ?? null).catch((err) => {
-          updateTask(task.instanceId, { detail: `打开失败：${String(err).slice(0, 200)}` });
-        });
-      });
-      actions.append(open);
-    } else if (task.status === "running" && isSourceTask(task)) {
-      const cancel = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["取消下载"]);
-      cancel.addEventListener("click", () => {
-        void cancelSourceDownload();
-        updateTask(task.instanceId, { detail: "正在取消…" });
-      });
-      actions.append(cancel);
-    }
-  }
-}
-
 /** 创建实例后的安装任务：状态写入全局 store，由订阅者渲染。 */
-async function startInstall(instanceId: string, name: string, version: string): Promise<void> {
+export async function startInstall(instanceId: string, name: string, version: string): Promise<void> {
   if (getTask(instanceId)?.status === "running") return; // 同实例已在安装，防双击重入（审查 R1）
   upsertTask({
     instanceId,
@@ -222,7 +129,7 @@ async function startInstall(instanceId: string, name: string, version: string): 
 
 /** 源码归档下载任务（FR-22）：合成 key 进同一任务 store，与实例任务卡并列。
  *  `instanceId` = 随实例落版本目录；null = 落全局 sources/。 */
-async function startSourceDownload(version: string, instanceId: string | null = null): Promise<void> {
+export async function startSourceDownload(version: string, instanceId: string | null = null): Promise<void> {
   const key = sourceTaskKey(version, instanceId);
   if (getTask(key)?.status === "running") return; // 同一落点同版本已在下载，不重复发起
   upsertTask({
@@ -248,6 +155,38 @@ async function startSourceDownload(version: string, instanceId: string | null = 
   }
 }
 
+// 模块级进度接线（H3）：dsh 安装阶段事件 → 任务 store（原 render 内处理器逐字上移）。
+onInstallProgress(({ instanceId, stage }) => {
+  const task = getTask(instanceId);
+  if (!task || task.status !== "running") return;
+  if (stage === "preparing") {
+    updateTask(instanceId, { phase: "prepare", detail: "" });
+  } else if (stage === "verifying") {
+    updateTask(instanceId, { phase: "verify", detail: "" });
+  } else if (stage === "done") {
+    updateTask(instanceId, { phase: "done", detail: "" });
+  } else if ("autoNode" in stage) {
+    updateTask(instanceId, { phase: "node", detail: stage.autoNode.detail });
+    recordProgress(instanceId, stage.autoNode.received, stage.autoNode.total);
+  } else if ("installing" in stage) {
+    const detail = stage.installing.detail;
+    if (detail.startsWith("正在从")) {
+      // 通道点名事件：存为常驻行，后续 npm 输出行不再覆盖它。
+      updateTask(instanceId, { channel: detail, detail: "", phase: "install" });
+    } else {
+      updateTask(instanceId, { phase: "install", detail });
+    }
+  }
+});
+
+// 模块级进度接线（H3）：市场安装（plugin-install-progress）→ 任务 store。
+// 详情页/列表页发起的安装无论停在哪个页面，任务管理页都能看到实时进度。
+onPluginProgress(({ detail, spec }) => {
+  if (!spec) return;
+  const task = getTask(spec);
+  if (task?.status === "running") updateTask(spec, { detail });
+});
+
 export const downloadsPage: PageDefinition = {
   id: "downloads",
   navLabel: "下载",
@@ -259,7 +198,8 @@ export const downloadsPage: PageDefinition = {
     // 与「拉失败」，渲染层要靠它说实话。
     let versionsError = "";
     let confirmVersion: string | null = null; // 非空 = 处于该版本的「开始下载」二级视图
-    let category: DlCategory = "dsh";
+    // 分类记忆上移模块级：从详情页 ← 返回时恢复离开时的分区（PCL 同行为）。
+    let category: DlCategory = lastDlCategory;
 
     // ===== 左栏分类 =====
     const leftNav = el("nav", { class: "dl-left__nav" }, []);
@@ -282,6 +222,7 @@ export const downloadsPage: PageDefinition = {
       );
       dshBtn.addEventListener("click", () => {
         category = "dsh";
+        lastDlCategory = "dsh";
         renderLeftNav();
         renderRight();
       });
@@ -295,6 +236,7 @@ export const downloadsPage: PageDefinition = {
         );
         btn.addEventListener("click", () => {
           category = item.id;
+          lastDlCategory = item.id;
           renderLeftNav();
           renderRight();
         });
@@ -303,73 +245,9 @@ export const downloadsPage: PageDefinition = {
     }
 
     // ===== 任务区：状态在全局 store，切页回来不丢；每秒刷新运行中卡的时长 =====
-    const taskArea = el("div", { class: "downloads-tasks" }, []);
 
-    function renderTaskArea(): void {
-      taskArea.replaceChildren();
-      const all = getTasks();
-      if (all.length === 0) return;
-      for (const task of all) {
-        const line = el("span", { class: "task-line" }, []);
-        const bar = el("div", { class: "task-bar", hidden: "" }, [el("div", { class: "task-bar__fill" })]);
-        const actions = el("div", { class: "task-actions" }, []);
-        const card = el(
-          "section",
-          { class: "card settings-card download-task", "data-task-id": task.instanceId },
-          [
-            el("h2", { class: "card__title" }, [
-              isSourceTask(task) ? task.name : `${task.name} · DSH ${task.version}`,
-            ]),
-            el("div", { class: "task-line-wrap" }, [line]),
-            bar,
-            actions,
-          ],
-        );
-        paintTaskCard(card, task);
-        taskArea.append(card);
-      }
-    }
-
-    function attachTaskArea(): void {
-      taskAreaUnsub?.();
-      if (tickTimer !== null) clearInterval(tickTimer);
-      taskAreaUnsub = subscribeTasks(renderTaskArea);
-      // 每秒只重绘运行中任务的行文本（时长跳动），done/failed 卡不重建。
-      tickTimer = setInterval(() => {
-        for (const task of getTasks()) {
-          if (task.status !== "running") continue;
-          const card = taskArea.querySelector(`[data-task-id="${task.instanceId}"]`);
-          if (card instanceof HTMLElement) paintTaskCard(card, task);
-        }
-      }, 1000);
-      renderTaskArea();
-    }
-
-    trackDownloadsEvent(
-      onInstallProgress(({ instanceId, stage }) => {
-        const task = getTask(instanceId);
-        if (!task || task.status !== "running") return;
-        if (stage === "preparing") {
-          updateTask(instanceId, { phase: "prepare", detail: "" });
-        } else if (stage === "verifying") {
-          updateTask(instanceId, { phase: "verify", detail: "" });
-        } else if (stage === "done") {
-          updateTask(instanceId, { phase: "done", detail: "" });
-        } else if ("autoNode" in stage) {
-          updateTask(instanceId, { phase: "node", detail: stage.autoNode.detail });
-          recordProgress(instanceId, stage.autoNode.received, stage.autoNode.total);
-        } else if ("installing" in stage) {
-          const detail = stage.installing.detail;
-          if (detail.startsWith("正在从")) {
-            // 通道点名事件：存为常驻行，后续 npm 输出行不再覆盖它。
-            updateTask(instanceId, { channel: detail, detail: "", phase: "install" });
-          } else {
-            updateTask(instanceId, { phase: "install", detail });
-          }
-        }
-      }),
-    );
-
+    /** keyed 增量渲染（R5）：新任务建卡（带入场动画），已有卡只涂变化字段，
+     *  消失的任务走退场动画后移除——进度缓动与入场不再被整区重建击穿。 */
     // 插件/技能安装进度：分区渲染时把状态行交给分区组件，这里只在事件到达
     // 时刷新「当前接线的」状态行（分区重渲染会替换引用）。spec 过滤（审查
     // R1）：插件与整合包共用 plugin-install-progress 通道，按发起安装时打在
@@ -400,15 +278,6 @@ export const downloadsPage: PageDefinition = {
     );
 
     // ===== 右栏渲染 =====
-    function renderPlaceholder(title: string, phase: string): void {
-      rightContent.replaceChildren(
-        el("section", { class: "card settings-card" }, [
-          el("h2", { class: "card__title" }, [title]),
-          el("p", { class: "settings-status" }, [`${title}资源聚合在 ${phase} 交付，敬请期待。`]),
-        ]),
-      );
-    }
-
     /** 版本行 → 进入该版本的「开始下载」二级视图。 */
     function openConfirm(version: string): void {
       confirmVersion = version;
@@ -421,10 +290,6 @@ export const downloadsPage: PageDefinition = {
         renderConfirm(confirmVersion);
         return;
       }
-
-      // 进行中任务最先看到（跨页存活的全局任务区）。
-      attachTaskArea();
-      if (getTasks().length > 0) rightContent.append(taskArea);
 
       if (versions.length === 0) {
         // 拉取失败必须说出来：此前归一成空数组，页面永远停在「加载中…」，
@@ -497,7 +362,8 @@ export const downloadsPage: PageDefinition = {
         row.addEventListener("click", () => openConfirm(v.version));
         pastList.append(row);
       }
-      const arrow = el("span", { class: "collapse-bar__arrow" }, ["▸"]);
+      const { root: arrow, sync: syncArrow } = collapseArrow();
+      syncArrow(true);
       const pastHeader = el(
         "button",
         { type: "button", class: "collapse-bar" },
@@ -505,12 +371,15 @@ export const downloadsPage: PageDefinition = {
       );
       pastList.hidden = true;
       pastHeader.addEventListener("click", () => {
-        pastList.hidden = !pastList.hidden;
-        arrow.textContent = pastList.hidden ? "▸" : "▾";
+        const opening = pastList.hidden;
+        // R5：高度动画展开/收起（anim.ts collapseToggle），箭头旋转逻辑不变。
+        collapseToggle(pastList, opening);
+        syncArrow(!opening);
       });
       rightContent.append(
         el("section", { class: "card settings-card collapse-group" }, [pastHeader, pastList]),
       );
+      __scheduleCascade();
     }
 
     /** 「开始下载」二级视图：头部（返回 + 可编辑实例名，恒显）+「下载内容」
@@ -538,7 +407,7 @@ export const downloadsPage: PageDefinition = {
         }
       })();
 
-      const backBtn = el("button", { type: "button", class: "dl-back", title: "返回版本列表" }, ["←"]);
+      const backBtn = el("button", { type: "button", class: "dl-back", title: "返回版本列表" }, [icon("back", 16)]);
       backBtn.addEventListener("click", () => {
         confirmVersion = null;
         renderRight();
@@ -551,7 +420,7 @@ export const downloadsPage: PageDefinition = {
       let wantSource = false;
 
       const startBtn = el("button", { type: "button", class: "dl-start-btn" }, [
-        el("span", { class: "dl-start-btn__icon" }, ["⬇"]),
+        el("span", { class: "dl-start-btn__icon" }, [icon("download", 18)]),
         "开始下载",
       ]);
       const syncStart = (): void => {
@@ -560,7 +429,7 @@ export const downloadsPage: PageDefinition = {
 
       const makeItemRow = (label: string, initial: boolean, onChange: (on: boolean) => void): HTMLElement => {
         let on = initial;
-        const box = el("span", { class: `dl-check ${on ? "dl-check--on" : ""}` }, on ? ["√"] : []);
+        const box = el("span", { class: `dl-check ${on ? "dl-check--on" : ""}` }, on ? [icon("check", 12)] : []);
         const row = el("button", { type: "button", class: "dl-item" }, [
           el("span", { class: "dl-item__label" }, [label]),
           box,
@@ -568,7 +437,7 @@ export const downloadsPage: PageDefinition = {
         row.addEventListener("click", () => {
           on = !on;
           box.classList.toggle("dl-check--on", on);
-          box.textContent = on ? "√" : "";
+          box.replaceChildren(...(on ? [icon("check", 12)] : []));
           onChange(on);
         });
         return row;
@@ -611,7 +480,8 @@ export const downloadsPage: PageDefinition = {
               void startSourceDownload(version, createdInstanceId);
             }
             confirmVersion = null;
-            renderRight();
+            // PCL Install_Click 原式：安装发起即切任务管理页（需求方点名的「下载加载页」）。
+            void navigate("tasks");
           } catch (err) {
             errLine.textContent = `创建实例失败：${String(err).slice(0, 300)}`;
             errLine.hidden = false;
@@ -639,6 +509,7 @@ export const downloadsPage: PageDefinition = {
       );
     }
 
+    const __scheduleCascade = () => enterItems(Array.from(rightContent.children) as HTMLElement[]);
     function renderRight(): void {
       if (category !== "dsh") {
         if (category === "plugins") {
@@ -647,10 +518,10 @@ export const downloadsPage: PageDefinition = {
         } else if (category === "skill") {
           rightContent.replaceChildren();
           skillStatusLine = renderSkillSection(rightContent);
-        } else if (category === "modpack") {
+        } else {
           rightContent.replaceChildren();
           modpackStatusLine = renderModpackSection(rightContent);
-        } else renderPlaceholder("整合包", "Phase 4");
+        }
         return;
       }
       renderDsh();

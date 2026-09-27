@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：DSH 源码归档下载（FR-22 修订落点见 FILE-LAYOUT §5）。 */
+import { invoke } from "./tauri";
 
 export interface SourceDownloadProgress {
   version: string;
@@ -8,10 +9,7 @@ export interface SourceDownloadProgress {
   total: number;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /**
  * 下载并解压指定版本的官方源码归档（GitHub tag dsh-v<版本>）。

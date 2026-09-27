@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：实例与注入配置相关命令。 */
+import { invoke } from "./tauri";
 
 export interface Instance {
   id: string;
@@ -22,10 +23,7 @@ export interface InjectConfig {
   agentsMd?: string | null;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 枚举全部实例（按创建顺序）。 */
 export function listInstances(): Promise<Instance[]> {
@@ -113,15 +111,4 @@ export function getGlobalAgentsMd(): Promise<string | null> {
 /** 写全局 AGENTS.md（null = 清除；实例下次配置物化时回落）。 */
 export function setGlobalAgentsMd(content: string | null): Promise<void> {
   return invoke<void>("inject_agents_global_set", { content });
-}
-
-/** 实例路由对账报告：勾了启用却落不了地的路由（带原因）+ 启动器不管的外来路由键。 */
-export interface RouteReport {
-  skipped: { vendor: string; label: string; reason: string }[];
-  external: string[];
-}
-
-/** 读实例的路由对账报告（只读，与桥接同一份判定）。 */
-export function getRouteReport(id: string): Promise<RouteReport> {
-  return invoke<RouteReport>("instance_route_report", { id });
 }

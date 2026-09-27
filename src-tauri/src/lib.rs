@@ -87,6 +87,7 @@ pub fn run() {
             instance_route_report,
             market_feed,
             market_versions,
+            market_github_releases,
             plugin_list,
             plugin_install,
             plugin_remove,
@@ -796,6 +797,14 @@ async fn market_versions(package: String) -> Result<market::VersionsReply, Strin
     tauri::async_runtime::spawn_blocking(move || market::fetch_versions(&package))
         .await
         .map_err(|e| format!("版本拉取任务崩溃：{e:?}"))?
+}
+
+/// GitHub 仓库 Releases（git 直装卡详情页的「历代版本」；网关 + Token + ETag 缓存）。
+#[tauri::command]
+async fn market_github_releases(repo: String) -> Result<Vec<github::ReleaseSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || github::repo_releases(&repo))
+        .await
+        .map_err(|e| format!("Releases 拉取任务崩溃：{e:?}"))?
 }
 
 /// 已装插件三分组清单（dsh 内置 / 第三方 / 自建，内置组不可删）。

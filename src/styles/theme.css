@@ -1,38 +1,129 @@
-/* PCL 风格主题变量 —— 色值取自 PCL2 开源仓库 Application.xaml 的官方色板 */
+/* ============================================================
+ * DSH 启动器 · 设计 token（唯一来源）
+ * 值全部对齐 PCL2 —— 依据 docs/design/pcl-visual-spec.md：
+ *   色板  = Meloong-Git/PCL Application.xaml（ColorBrush1-8 / Gray1-8 / 语义色）
+ *   形状  = FormMain.xaml / MyCard.vb / MyListItem.xaml.vb / MyMsg*
+ *   动效  = ModAnimation.vb 缓动族（CSS 侧存近似曲线，精确公式在 src/lib/anim.ts）
+ * 主题色体系：8 色为主题色按 HSL(Sat85, L25~97) 派生（ModSecret.vb:67-133）。
+ * 本阶段锁默认蓝；整套色板可按派生规则整体重生成（FR-11，P6）。
+ * 下层「旧名别名」区供存量规则过渡引用，S3/S4 迁移后回收。
+ * ============================================================ */
 :root {
-  /* 主色阶（ColorBrush2~8） */
-  --color-primary-deep: #0b5bcb;
-  --color-primary: #1370f3;
-  --color-primary-bright: #4890f5;
-  --color-primary-light: #96c0f9;
-  --color-primary-pale: #d5e6fd;
-  --color-bg-page: #eaf2fe;        /* ColorBrush8：内容区底 */
-  --color-bg-page-alt: #e0eafd;    /* ColorBrush7 */
+  /* ---- 主题蓝系 ColorBrush1-8（Application.xaml）---- */
+  --cb1: #343d4a; /* 前景主色：正文、按钮常态描边、卡片标题 */
+  --cb2: #0b5bcb; /* 主色深：Highlight 描边、高对比选中 */
+  --cb3: #1370f3; /* 主色：hover 描边、选中前景、链接 */
+  --cb4: #4890f5; /* 主色亮：标题栏渐变基色、输入 hover 描边 */
+  --cb5: #96c0f9; /* 主色浅：输入常态描边（Bg0） */
+  --cb6: #d5e6fd; /* 极浅蓝：按下底、下拉选中底 */
+  --cb7: #e0eafd; /* 浅蓝：hover 底 */
+  --cb8: #eaf2fe; /* 最浅蓝：页面底、下拉 hover 底 */
+  --cb-bg0: #96c0f9;      /* 输入类描边 */
+  --cb-bg1: #e0eafdbe;    /* 列表项 hover 叠层 */
 
-  /* 文本（Gray1~3） */
-  --color-text: #404040;
-  --color-text-secondary: #737373;
-  --color-text-tertiary: #8c8c8c;
+  /* ---- 灰阶 Gray1-8（Application.xaml）---- */
+  --gray1: #404040;
+  --gray2: #737373;
+  --gray3: #8c8c8c;
+  --gray4: #a6a6a6; /* 禁用文字/描边 */
+  --gray5: #cccccc; /* 禁用输入描边、分隔线 */
+  --gray6: #ebebeb;
+  --gray7: #f0f0f0;
+  --gray8: #f5f5f5;
 
-  /* 状态 */
-  --color-danger-hover: #ff4c4c;
-  --color-danger-dark: #ce2111;
+  /* ---- 语义与叠加（Application.xaml / MyHint.xaml.vb）----
+     ⚠ WPF 8位hex 是 #AARRGGBB，CSS 是 #RRGGBBAA——从 PCL 抄带透明度的色值必须换算通道序 */
+  --red-back: #fbdddd80;  /* Red 变体 hover 底 */
+  --red-light: #ff4c4c;   /* Red hover 描边 */
+  --red-dark: #ce2111;    /* Red 常态描边（删除类） */
+  --half-white: #ffffff55;    /* 按钮/列表常态底 */
+  --semi-white: #ffffffbb;
+  --sidebar-white: #fffffff1;
+  --semi-transparent: #eaf2fe01;
+  --white: #ffffff; /* ColorBrushWhite */
+  --hint-blue-bg: #d9ecff;   --hint-blue-border: #1172d4;   --hint-blue-text: #0f64b8;
+  --hint-red-bg: #ffdddf;    --hint-red-border: #d82929;    --hint-red-text: #bf0b0b;
+  --hint-yellow-bg: #ffebd7; --hint-yellow-border: #f57a00; --hint-yellow-text: #d86c00;
+  --msg-bg: #fbfbfb;      /* 弹窗面板底（MyMsg 三件套） */
+  --msg-text: #5c5c5c;    /* 弹窗正文 */
+  --overlay: rgba(15, 35, 60, 0.45); /* 弹窗遮罩（S5 对实机复核） */
+  --warn-text: #b45555;   /* 启动按钮 warn 小字（phase-00:100 记录值） */
+  --text-faint: #9b9b9b;  /* 启动按钮下版本小字（phase-00:100 记录值） */
+  --brand-deepseek: #4d6bfe; /* DeepSeek 品牌色（厂商头像专用） */
+  --tab-active-bg: #1370f314; /* 市场 tab 选中底（S4 对照 PCL 复核） */
 
-  /* 圆角（窗体 6px 来自 FormMain RectForm RadiusX/Y=6） */
-  --radius-window: 6px;
-  --radius-md: 8px;
-  --radius-card: 13px;
+  /* ---- 形状（G3：窗6/卡5/列表6/输入3/浮层3/胶囊13.5/弹窗7）---- */
+  --radius-win: 6px;
+  --radius-card: 5px;
+  --radius-list: 6px;
+  --radius-input: 3px;
+  --radius-btn: 3px;
+  --radius-float: 3px;
+  --radius-pill: 13.5px;
+  --radius-msg: 7px;
 
-  /* 字阶 */
-  --font-size-xs: 11px;
-  --font-size-sm: 13px;
-  --font-size-md: 14px;
-  --font-size-lg: 16px;
-  --font-size-xl: 20px;
+  /* ---- 阴影（PCL MyDropShadow：r3、色 #343d4a、idle 0.07 / hover 0.4；WPF blur≈CSS×2）---- */
+  --shadow-win: 0 0 8px rgba(0, 0, 0, 0.13), 0 0 1px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 0 6px rgba(52, 61, 74, 0.07);
+  --shadow-card-hover: 0 0 6px rgba(52, 61, 74, 0.4);
+  --shadow-float: 0 6px 18px rgba(0, 0, 0, 0.12);
+  --shadow-modal: 0 18px 48px rgba(15, 35, 60, 0.35);
 
-  --font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  /* ---- 字体排版（G2：字阶 11/12/13/15(+13.5/23)）---- */
+  --font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-mono: Consolas, "Cascadia Mono", "Courier New", monospace;
+  --fs-xs: 11px;        /* 启动按钮下版本小字 */
+  --fs-info: 12px;      /* 列表副标(@.6)、组标签 */
+  --fs-body: 13px;      /* 正文/按钮/卡片标题基线 */
+  --fs-search: 13.5px;  /* 搜索框输入（MySearchBox） */
+  --fs-title: 15px;     /* 二级标题栏标题 */
+  --fs-msg-title: 23px; /* 弹窗标题 */
 
-  /* 布局（48px 蓝栏来自 FormMain.xaml；10px 透明边带承载 PCL 级微弱投影） */
+  /* ---- 动效（G5；精确缓动公式在 anim.ts，此处为 CSS 近似）---- */
+  --anim-fast: 100ms;
+  --anim-norm: 200ms;
+  --anim-slow: 400ms;
+  --ease-out: cubic-bezier(0.215, 0.61, 0.355, 1);      /* ≈ OutFluent */
+  --ease-out-back: cubic-bezier(0.34, 1.56, 0.64, 1);   /* ≈ OutBack */
+
+  /* ---- 布局 ---- */
   --topbar-height: 48px;
   --window-frame: 10px;
+  --home-left-width: 300px;  /* 主页左栏（PageLaunchLeft） */
+  --sidebar-width: 145px;    /* 下载/设置页左栏（实机量得） */
+  --page-pad: 25px;          /* 内容区页边距（PageSetup/Download） */
+  --card-gap: 15px;          /* 卡片间距 */
+  --form-row-h: 28px;        /* 表单行高 */
+  --list-item-h: 36px;       /* 左栏导航项高 */
+
+  /* ---- 标题栏三段水平渐变（ModSecret.vb；默认蓝近似实机）---- */
+  --titlebar-gradient: linear-gradient(90deg, #3f89f6 0%, #2e7cf0 55%, #266fe4 100%);
+  /* 内容区默认背景（PCL 内置渐变图的 CSS 等效，实机采样；不拷资产） */
+  --bg-content-gradient: linear-gradient(135deg, #eef5fe 0%, #dfeafc 55%, #cfe0f9 100%);
+
+  /* ============================================================
+   * 旧名别名区（存量规则过渡用；S3/S4 迁移到新名后整体回收）
+   * ============================================================ */
+  --color-primary-deep: var(--cb2);
+  --color-primary: var(--cb3);
+  --color-primary-bright: var(--cb4);
+  --color-primary-light: var(--cb5);
+  --color-primary-pale: var(--cb6);
+  --color-bg-page: var(--cb8);
+  --color-bg-page-alt: var(--cb7);
+  --color-text: var(--gray1);
+  --color-text-primary: var(--gray1);
+  --color-text-secondary: var(--gray2);
+  --color-text-tertiary: var(--gray3);
+  --color-danger-hover: var(--red-light);
+  --color-danger-dark: var(--red-dark);
+  --color-success: var(--cb3); /* G8：PCL 无状态绿，成功/运行态用主色蓝表达 */
+  --color-warn: var(--warn-text);
+  --radius-window: var(--radius-win);
+  --radius-md: var(--radius-input);
+  --font-size-xs: var(--fs-xs);
+  --font-size-sm: var(--fs-body);
+  --font-size-md: var(--fs-body);
+  --font-size-lg: var(--fs-title);
+  --font-size-xl: var(--fs-title);
 }

@@ -231,6 +231,61 @@ pub fn repo_tags(full_name: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Release 摘要（详情页「全部版本」行；camelCase 与前端契约一致）。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseSummary {
+    pub tag_name: String,
+    pub name: String,
+    pub published_at: String,
+    pub prerelease: bool,
+}
+
+/// 仓库 Releases 列表（`owner/repo`；git 直装卡的「历代版本」，阻塞网络调用）。
+/// 跳过 draft；prerelease 保留（前端打徽章）。走 api_get_json：网关 + Token +
+/// ETag 缓存 + 限流可读错误全自动。
+pub fn repo_releases(full_name: &str) -> Result<Vec<ReleaseSummary>, String> {
+    if full_name.matches('/').count() != 1
+        || full_name.split('/').any(|part| {
+            part.is_empty() || part.contains([' ', '?', '#', '&', '/'])
+        })
+    {
+        return Err(format!("非法仓库标识：{full_name:?}"));
+    }
+    let path = format!("/repos/{full_name}/releases");
+    let outcome = api_get_json(&path, "per_page=30")?;
+    let Some(items) = outcome.body.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .iter()
+        .filter_map(|r| {
+            let tag = r.get("tag_name").and_then(|v| v.as_str())?;
+            if r.get("draft").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return None;
+            }
+            Some(ReleaseSummary {
+                tag_name: tag.to_string(),
+                name: r
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or(tag)
+                    .to_string(),
+                published_at: r
+                    .get("published_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                prerelease: r
+                    .get("prerelease")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

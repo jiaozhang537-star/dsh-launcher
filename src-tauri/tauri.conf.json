@@ -14,10 +14,10 @@
     "windows": [
       {
         "title": "DSH 启动器",
-        "width": 900,
-        "height": 600,
-        "minWidth": 800,
-        "minHeight": 520,
+        "width": 850,
+        "height": 500,
+        "minWidth": 810,
+        "minHeight": 470,
         "center": true,
         "decorations": false,
         "transparent": true,

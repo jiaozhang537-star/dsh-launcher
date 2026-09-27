@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：多厂商 API Key 保险库（FR-06）。 */
+import { invoke } from "./tauri";
 
 export interface VendorKeyStatus {
   vendor: string;
@@ -31,10 +32,7 @@ export const DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"] as const
  */
 export const KEY_MASK = "dsh-masked-key";
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 读保险库状态（多厂商视图；无密钥材料）。 */
 export function getStatus(): Promise<KeyvaultStatus> {

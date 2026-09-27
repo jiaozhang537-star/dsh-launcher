@@ -1,4 +1,6 @@
 import { el } from "../lib/dom";
+import { icon } from "../lib/icons";
+import { enterMsg } from "../lib/anim";
 import { sortInstancesByRecency } from "../lib/instanceOrder";
 import { dropFavorite, isFavorite, loadFavorites, toggleFavorite } from "../lib/instanceFavorites";
 import { getSelectedInstance, setSelectedInstance } from "../lib/selected-instance";
@@ -12,11 +14,6 @@ import {
   type Instance,
 } from "../services/instances";
 import { openModpackImport } from "./modpack-import";
-
-/** 版本行内右侧悬浮操作：收藏（♥）/ 删除（垃圾桶）/ 设置（齿轮）。 */
-const ACT_FAV = "♥";
-const ACT_DEL = "🗑";
-const ACT_SET = "⚙";
 
 /** 版本图标：DSH 鲸鱼标（public/vendor-logos/deepseek.png）装进正方形小框。 */
 function versionIcon(): HTMLElement {
@@ -53,8 +50,8 @@ export const instanceSelectPage: PageDefinition = {
 
     const addFolderBtn = el(
       "button",
-      { type: "button", class: "sub-left__action", title: "选择一个实例文件夹原地注册（数据留在原地；需含 instance.json 或已安装 DSH 本体）" },
-      ["⊕ 添加已有文件夹"],
+      { type: "button", class: "sub-left__action", title: "注册已有的 DSH 目录为实例" },
+      [icon("plus", 14), "添加已有文件夹"],
     );
     addFolderBtn.addEventListener("click", () => {
       void (async () => {
@@ -73,8 +70,8 @@ export const instanceSelectPage: PageDefinition = {
     });
     const importPackBtn = el(
       "button",
-      { type: "button", class: "sub-left__action", title: "选择整合包 tgz 文件导入（也可以直接拖进窗口任意位置）" },
-      ["⊙ 导入整合包"],
+      { type: "button", class: "sub-left__action", title: "选择整合包 tgz 导入" },
+      [icon("import", 14), "导入整合包"],
     );
     importPackBtn.addEventListener("click", () => {
       void openModpackImport(null);
@@ -136,6 +133,7 @@ export const instanceSelectPage: PageDefinition = {
     }
 
     function renderConfirmCard(): void {
+      const firstShow = confirmOverlay.hidden && confirmTarget != null;
       confirmOverlay.hidden = !confirmTarget;
       if (confirmTarget) {
         // 外部实例（原地引用）：删除 = 仅解除关联，绝不删用户文件夹。
@@ -152,6 +150,8 @@ export const instanceSelectPage: PageDefinition = {
           ]),
         );
       }
+      // 弹窗入场（spec §5 MyMsg：Y40→0 300ms OutBack）——只在由隐转现那一次播。
+      if (firstShow) enterMsg(confirmOverlay.querySelector<HTMLElement>(".confirm-card")!);
     }
 
     /**
@@ -177,7 +177,7 @@ export const instanceSelectPage: PageDefinition = {
         type: "button",
         class: `ver-act ver-act--fav${isFavorite(inst.id) ? " is-on" : ""}`,
         title: isFavorite(inst.id) ? "取消收藏" : "收藏",
-      }, [ACT_FAV]);
+      }, [icon("heart", 15)]);
       favBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         const on = toggleFavorite(inst.id);
@@ -190,7 +190,7 @@ export const instanceSelectPage: PageDefinition = {
         type: "button",
         class: "ver-act ver-act--del",
         title: "删除该版本",
-      }, [ACT_DEL]);
+      }, [icon("trash", 15)]);
       delBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         confirmTarget = inst;
@@ -201,7 +201,7 @@ export const instanceSelectPage: PageDefinition = {
         type: "button",
         class: "ver-act",
         title: "打开版本设置",
-      }, [ACT_SET]);
+      }, [icon("gear", 15)]);
       setBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         currentId = inst.id;

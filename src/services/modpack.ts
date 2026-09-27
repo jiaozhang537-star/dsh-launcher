@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：整合包导出/导入/预览（P4，FR-04）。 */
+import { invoke } from "./tauri";
 
 export type ModpackType = "plugins" | "settings" | "mixed";
 
@@ -47,10 +48,7 @@ export interface ModpackImportReport {
   warnings: string[];
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /**
  * 导出整合包到 dest（保存对话框给的完整路径）；阻塞至完成，

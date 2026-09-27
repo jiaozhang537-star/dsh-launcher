@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：模型提供方目录（FR-20）/ 排序 / 自定义。 */
+import { invoke } from "./tauri";
 
 export type ApiStyle = "openai" | "responses" | "anthropic" | "gemini" | "ollama";
 
@@ -29,10 +30,7 @@ export interface ProvidersView {
   order: string[];
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 提供方目录视图（内置 11 类 + 自定义 + 排序）。 */
 export function fetchProvidersView(): Promise<ProvidersView> {

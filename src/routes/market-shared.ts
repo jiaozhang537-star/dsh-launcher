@@ -1,7 +1,10 @@
 /** 插件市场 / Skill 中心共享件：口语化格式化 + 条目图标 + 实例选择弹窗。
  * 弹窗按「describe 每实例可装性 → run 执行 → 状态行跟进」的契约复用。 */
 import { el } from "../lib/dom";
+import { enterMsg } from "../lib/anim";
+import { icon, type IconName } from "../lib/icons";
 import { listInstances, type Instance } from "../services/instances";
+import type { MarketCard } from "../services/market";
 
 /** 下载量口语化：3.1 万 / 2.18 亿 / 876。 */
 export function fmtCount(n: number): string {
@@ -37,6 +40,17 @@ export function cardIcon(iconUrl: string, name: string): HTMLElement {
   return letterTile(name);
 }
 
+/**
+ * 元信息行小项（spec R1）：`span.mk-meta__item > 小图标 + 文本`。
+ * name 传 "none" 表示纯文本项（不带图标）；图标颜色随 currentColor。
+ */
+export function metaItem(name: IconName | "none", text: string): HTMLElement {
+  const item = el("span", { class: "mk-meta__item" }, []);
+  if (name !== "none") item.append(icon(name, 12));
+  item.append(el("span", {}, [text]));
+  return item;
+}
+
 /** 实例选择弹窗的契约。 */
 export interface ChooserOptions {
   /** 安装进度/结果写这里（分区状态行）。 */
@@ -70,6 +84,8 @@ export function openInstanceChooser(opts: ChooserOptions): void {
   ]);
   overlay.append(card);
   document.body.append(overlay);
+  // R5：弹窗入场动画（Y40→0 淡入，MyMsg 规格），与其他弹窗一致不再瞬现。
+  enterMsg(card);
 
   void (async () => {
     try {
@@ -95,7 +111,7 @@ export function openInstanceChooser(opts: ChooserOptions): void {
           opts
             .run(inst)
             .then((message) => {
-              opts.statusLine.textContent = `✓ ${message}`;
+              opts.statusLine.textContent = message;
             })
             .catch((err) => {
               opts.statusLine.classList.add("mk-status--error");
@@ -116,4 +132,39 @@ export function openInstanceChooser(opts: ChooserOptions): void {
       );
     }
   })();
+}
+
+/** 来源通道的展示名（列表页与详情页共用）。 */
+export const SOURCE_LABELS: Record<MarketCard["source"], string> = {
+  npm: "npm",
+  github: "GitHub",
+  dshhub: "dsh-hub",
+};
+
+/** 作者名：repo owner 段或 scoped 包名的 @scope 段；取不到为空串。 */
+export function authorOf(card: MarketCard): string {
+  if (card.repo) return card.repo.split("/")[0] ?? "";
+  const npm = card.npmName ?? "";
+  return npm.startsWith("@") ? (npm.slice(1).split("/")[0] ?? "") : "";
+}
+
+/** 元信息行：作者 · 版本 · 下载 · 更新 · 来源（+星标/验证标记）。 */
+export function buildMetaLine(card: MarketCard): HTMLElement {
+  const line = el("div", { class: "mk-meta" }, []);
+  const author = authorOf(card);
+  if (author) line.append(metaItem("pen", author));
+  if (card.latestVersion) line.append(metaItem("none", `v${card.latestVersion}`));
+  if (card.monthlyDownloads !== null) {
+    line.append(metaItem("download", `${fmtCount(card.monthlyDownloads)}/月`));
+  } else if (card.stars !== null) {
+    line.append(metaItem("star", fmtCount(card.stars)));
+  } else {
+    line.append(metaItem("download", "未知"));
+  }
+  line.append(metaItem("arrow-up", relTime(card.updatedAt)));
+  line.append(metaItem("globe", SOURCE_LABELS[card.source]));
+  if (card.verified === true) {
+    line.append(el("span", { class: "mk-verified" }, [icon("check", 11), "已验证"]));
+  }
+  return line;
 }

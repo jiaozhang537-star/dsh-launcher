@@ -1,4 +1,5 @@
 /** Tauri invoke 的类型化薄封装：统一下载网关与镜像源设置（FR-18）。 */
+import { invoke } from "./tauri";
 
 export interface MirrorSourceInfo {
   id: string;
@@ -20,10 +21,7 @@ export interface ProbeResult {
   detail: string;
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(cmd, args);
-}
+
 
 /** 读镜像源设置（含版本通道与社区通道的内置源清单）。 */
 export function getMirror(): Promise<MirrorSettingsInfo> {

@@ -4,7 +4,9 @@
  *  布局定稿（走查反馈②）：蓝色标题（红色是删除确认专用语义）、摘要一行、
  *  内容分区平铺文本（不用窄滚动小框——那是空白框/文字裁切的根因）。 */
 
-import { el } from "../lib/dom";
+import { el, pclRadio } from "../lib/dom";
+import { enterMsg } from "../lib/anim";
+import { showHint } from "../lib/hint";
 import { getSelectedInstance } from "../lib/selected-instance";
 import { listInstances, type Instance } from "../services/instances";
 import {
@@ -90,7 +92,7 @@ export async function openModpackImport(filePath: string | null): Promise<void> 
   try {
     manifest = await modpackPeek(path);
   } catch (err) {
-    alert(`无法读取整合包：\n${String(err).slice(0, 300)}`);
+    showHint(`无法读取整合包：${String(err).slice(0, 300)}`);
     modpackModalOpen = false;
     return;
   }
@@ -125,6 +127,8 @@ export async function openModpackImport(filePath: string | null): Promise<void> 
   };
   cancelBtn.addEventListener("click", close);
   document.body.append(overlay);
+  // 弹窗入场（spec §5 MyMsg：Y40→0 300ms OutBack）——元素已插入 DOM 后播一次。
+  enterMsg(overlay.querySelector<HTMLElement>(".confirm-card")!);
 
   const { summary, sections } = buildPreview(manifest);
 
@@ -140,19 +144,22 @@ export async function openModpackImport(filePath: string | null): Promise<void> 
   if (defaultTarget) targetSelect.value = defaultTarget.id;
   targetSelect.disabled = instances.length === 0;
 
-  const globalRadio = el("input", { type: "radio", name: "modpack-target-mode" }) as HTMLInputElement;
-  const instanceRadio = el("input", { type: "radio", name: "modpack-target-mode" }) as HTMLInputElement;
-  const globalLabel = el("label", { class: "modpack-radio" }, [
-    globalRadio,
-    el("span", {}, ["写入全局默认（所有版本共享，新版本自动继承）"]),
-  ]);
-  const instanceLabel = el("label", { class: "modpack-radio" }, [
-    instanceRadio,
-    el("span", {}, ["只写入下方所选版本"]),
-  ]);
-  globalRadio.checked = true;
+  // 自绘单选（R1）：同名 name 由浏览器原生互斥，value/checked 语义不变。
+  const globalCheck = pclRadio({
+    name: "modpack-target-mode",
+    checked: true,
+    label: "写入全局默认（所有版本共享，新版本自动继承）",
+  });
+  const globalRadio = globalCheck.input;
   // 零实例时「只写入下方所选版本」无目标可选，禁用（审查 P3-10）。
-  instanceRadio.disabled = instances.length === 0;
+  const instanceCheck = pclRadio({
+    name: "modpack-target-mode",
+    label: "只写入下方所选版本",
+    disabled: instances.length === 0,
+  });
+  const instanceRadio = instanceCheck.input;
+  const globalLabel = el("div", { class: "modpack-radio" }, [globalCheck.root]);
+  const instanceLabel = el("div", { class: "modpack-radio" }, [instanceCheck.root]);
   globalRadio.addEventListener("change", () => {
     if (globalRadio.checked) settingsTarget = "global";
   });
@@ -177,22 +184,14 @@ export async function openModpackImport(filePath: string | null): Promise<void> 
         : el("p", { class: "settings-path" }, ["包内插件将经离线安装链装入所选版本；失败会整体回滚。"]),
     );
   } else if (hasSettings && instances.length > 0) {
-    body.append(
-      el("p", { class: "modpack-section-title" }, ["设置写入到版本"]),
-      targetSelect,
-      el("p", { class: "settings-path" }, [
-        "选择「只写入下方所选版本」时，设置写入该版本；选「写入全局默认」时本选择不参与导入。",
-      ]),
-    );
+    body.append(el("p", { class: "modpack-section-title" }, ["设置写入到版本"]), targetSelect);
   }
   if (hasSettings) {
     body.append(
       el("p", { class: "modpack-section-title" }, ["设置写入位置"]),
       globalLabel,
       instanceLabel,
-      el("p", { class: "settings-path" }, [
-        "提供商不含 API Key（导入后需自行填写）；AGENTS.md 保存即生效。",
-      ]),
+      el("p", { class: "settings-path" }, ["提供商不含 API Key。"]),
     );
   }
   body.append(validation);
