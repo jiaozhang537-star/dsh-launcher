@@ -134,4 +134,58 @@ describe("router", () => {
     await waitForHashSettled("#/downloads");
     expect(container.querySelector("section")?.dataset.page).toBe("downloads");
   });
+
+  it("goBack 按来路逐级回退，不与上一页互相弹跳", async () => {
+    const r = await freshRouter();
+    r.registerPages([makePage("launch"), makePage("select"), makePage("settings")]);
+    const container = document.createElement("main");
+    document.body.append(container);
+    r.mountRouter(container);
+
+    r.navigate("select");
+    await waitForHashSettled("#/select");
+    r.navigate("settings");
+    await waitForHashSettled("#/settings");
+
+    r.goBack();
+    await waitForHashSettled("#/select");
+    expect(container.querySelector("section")?.dataset.page).toBe("select");
+
+    // P5 单槽 lastPageId 在此步会弹回 settings（乒乓）；真栈应回到 launch
+    r.goBack();
+    await waitForHashSettled("#/launch");
+    expect(container.querySelector("section")?.dataset.page).toBe("launch");
+  });
+
+  it("刷新直达二级页时 goBack 回主页", async () => {
+    const r = await freshRouter();
+    r.registerPages([makePage("launch"), makePage("settings")]);
+    location.hash = "#/settings";
+    const container = document.createElement("main");
+    document.body.append(container);
+    r.mountRouter(container);
+
+    r.goBack();
+    await waitForHashSettled("#/launch");
+    expect(container.querySelector("section")?.dataset.page).toBe("launch");
+  });
+
+  it("同 hash 重复派发 hashchange 不污染历史，goBack 仍按来路", async () => {
+    const r = await freshRouter();
+    r.registerPages([makePage("launch"), makePage("settings")]);
+    const container = document.createElement("main");
+    document.body.append(container);
+    r.mountRouter(container);
+
+    r.navigate("settings");
+    await waitForHashSettled("#/settings");
+    // happy-dom 对一次赋值可能派发多次 hashchange：补发一次模拟。
+    // 若栈被重复压入同名页，goBack 的「栈顶-1」将等于当前页 → 卡死不回。
+    window.dispatchEvent(new Event("hashchange"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    r.goBack();
+    await waitForHashSettled("#/launch");
+    expect(container.querySelector("section")?.dataset.page).toBe("launch");
+  });
 });

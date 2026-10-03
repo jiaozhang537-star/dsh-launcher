@@ -13,6 +13,7 @@ import {
   type SystemNodeInfo,
 } from "../services/nodeRuntime";
 import { getGlobalAgentsMd, getInstancesDir, setGlobalAgentsMd } from "../services/instances";
+import { recordProgress, terminalFailure, updateTask, upsertTask } from "../lib/downloadTasks";
 import { getMirror, setCommunityMirror, setMirror, testMirror, type MirrorSettingsInfo } from "../services/gateway";
 import {
   clearKey,
@@ -29,6 +30,8 @@ import {
 import { fetchModels } from "../services/provider";
 import { keySaveEligible } from "../lib/vendor";
 import { providerIconPath } from "../lib/providerIcon";
+import { PRESET_HUES, deriveThemeTokens, hexToHsl, loadTheme, saveTheme, clearThemeOverride, type ThemeColor } from "../lib/theme";
+import { getMaxDownloads, getProxy, setMaxDownloads, setProxy } from "../services/launcherConfig";
 import {
   addCustomProvider,
   fetchProvidersView,
@@ -38,6 +41,7 @@ import {
   type CatalogEntry,
 } from "../services/providers";
 
+/** 构建期回退版本号（Tauri 环境下由 getVersion() 覆写为 tauri.conf.json 值）。 */
 const APP_VERSION = "0.1.0";
 
 /** 提供方目录条目的统一展示素材（内置与自定义同构）。 */
@@ -900,8 +904,9 @@ async function renderNodePanel(card: HTMLElement, note?: string): Promise<void> 
   const progressLabel = el("span", { class: "settings-progress-label" }, [""]);
   const downloadBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["下载并托管"]);
   const cancelBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn", hidden: "" }, ["取消下载"]);
+  let activeKey: string | null = null;
   cancelBtn.addEventListener("click", () => {
-    void cancelDownload();
+    if (activeKey) void cancelDownload(activeKey).catch(() => {});
     progressLabel.textContent = "正在取消…";
   });
   downloadBtn.addEventListener("click", () => {
@@ -911,20 +916,44 @@ async function renderNodePanel(card: HTMLElement, note?: string): Promise<void> 
         progressLabel.textContent = "请输入 x.y.z 形式的版本号";
         return;
       }
+      const key = `node-${version}`;
+      activeKey = key;
       downloadBtn.disabled = true;
       cancelBtn.hidden = false;
       progressLabel.textContent = "准备下载…";
+      // FR-09：Node 下载进统一任务队列（任务管理页可见、可暂停/继续/取消）。
+      // phase 沿用 "source"（字节流展示态：任务行显示进度文案而非已运行时长）。
+      upsertTask({
+        instanceId: key,
+        name: `Node v${version} 运行时`,
+        version,
+        status: "running",
+        phase: "source",
+        detail: "",
+        received: 0,
+        total: 0,
+        speed: null,
+        startedAt: Date.now(),
+        kind: "node",
+        canPause: true,
+      });
       try {
         await downloadNode(version, ({ received, total }) => {
-          progressLabel.textContent =
+          const text =
             total > 0 ? `下载中 ${formatBytes(received)} / ${formatBytes(total)}` : `已接收 ${formatBytes(received)}`;
+          progressLabel.textContent = text;
+          recordProgress(key, received, total);
+          updateTask(key, { detail: text });
         });
+        updateTask(key, { status: "done", phase: "done", detail: "" });
         // 重渲染清掉进度行，完成提示经 note 在新面板中显示。
         await renderNodePanel(card, `已托管 ${version}`);
       } catch (err) {
+        updateTask(key, terminalFailure(err));
         const text = String(err);
         progressLabel.textContent = text.includes("已取消") ? "已取消下载" : `下载失败：${text}`;
       } finally {
+        activeKey = null;
         downloadBtn.disabled = false;
         cancelBtn.hidden = true;
       }
@@ -1156,13 +1185,142 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
   } catch {
     instancesDir = "（未知）";
   }
+  const versionBadge = el("span", { class: "settings-badge settings-badge--ok" }, [`v${APP_VERSION}`]);
+  // 真实版本号（tauri.conf.json）；非 Tauri 环境保留构建期回退。
+  void import("@tauri-apps/api/app")
+    .then(({ getVersion }) => getVersion())
+    .then((v) => {
+      versionBadge.textContent = `v${v}`;
+    })
+    .catch(() => {});
   pane.append(
     el("section", { class: "card settings-card" }, [
       el("h2", { class: "card__title" }, ["启动器状态"]),
       el("div", { class: "settings-node-card" }, [
-        el("span", { class: "settings-badge settings-badge--ok" }, [`v${APP_VERSION}`]),
+        versionBadge,
         el("span", { class: "settings-path" }, [`数据目录：${instancesDir}`]),
       ]),
+    ]),
+  );
+
+  // 主题色（FR-11）：PCL ModSecret 同式派生——选色即整套色板联动；
+  // 未选自定义主题时保持 phase-05 对齐的静态默认蓝。
+  const themeStatus = el("p", { class: "settings-status" }, [""]);
+  let currentTheme: ThemeColor | null = loadTheme();
+  const swatches = el("div", { class: "theme-swatches" }, []);
+  const syncSwatches = (): void => {
+    swatches.replaceChildren(
+      ...PRESET_HUES.map((hue) => {
+        const color = deriveThemeTokens({ hue, sat: 85 })["--cb3"];
+        const active = currentTheme?.hue === hue;
+        const swatch = el("button", {
+          type: "button",
+          class: `theme-swatch${active ? " theme-swatch--on" : ""}`,
+          style: `background:${color}`,
+          title: `主题色 ${hue}°`,
+          "aria-label": `主题色 ${hue}°`,
+        });
+        swatch.addEventListener("click", () => {
+          currentTheme = { hue, sat: 85 };
+          saveTheme(currentTheme);
+          syncSwatches();
+          themeStatus.textContent = "已切换主题色。";
+        });
+        return swatch;
+      }),
+    );
+  };
+  syncSwatches();
+  const themeInput = el("input", { type: "color", class: "settings-input theme-input", value: "#1370f3" });
+  themeInput.addEventListener("input", () => {
+    const picked = themeInput.value;
+    // 自选色：取其色相与饱和度，明度沿用 PCL 分档（派生公式固定）。
+    const hsl = hexToHsl(picked);
+    if (!hsl) return;
+    currentTheme = { hue: Math.round(hsl.h), sat: Math.max(40, Math.min(100, hsl.s)) };
+    saveTheme(currentTheme);
+    syncSwatches();
+    themeStatus.textContent = `已切换主题色：${picked}`;
+  });
+  const themeReset = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["恢复默认"]);
+  themeReset.addEventListener("click", () => {
+    clearThemeOverride();
+    currentTheme = null;
+    syncSwatches();
+    themeStatus.textContent = "已恢复默认蓝主题。";
+  });
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["主题色"]),
+      swatches,
+      el("div", { class: "settings-row" }, [themeInput, themeReset]),
+      themeStatus,
+    ]),
+  );
+
+  // 下载并发（FR-09 队列额度 / FR-11）。
+  const concSelect = el("select", { class: "settings-input" }, []);
+  for (let n = 1; n <= 10; n += 1) {
+    concSelect.append(el("option", { value: String(n) }, [String(n)]));
+  }
+  const concStatus = el("p", { class: "settings-status" }, [""]);
+  void getMaxDownloads()
+    .then((v) => {
+      concSelect.value = String(v);
+    })
+    .catch((err) => {
+      concStatus.textContent = `读取失败：${String(err).slice(0, 160)}`;
+    });
+  concSelect.addEventListener("change", () => {
+    void setMaxDownloads(Number(concSelect.value))
+      .then(() => {
+        concStatus.textContent = "已保存——对之后的下载任务生效。";
+      })
+      .catch((err) => {
+        concStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
+      });
+  });
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["下载并发"]),
+      el("div", { class: "settings-row" }, [el("span", {}, ["同时下载任务数："]), concSelect]),
+      concStatus,
+    ]),
+  );
+
+  // 网络代理（FR-11）：作用于全部启动器取数（含镜像测试、下载、npm 子进程链）。
+  const proxyInput = el("input", {
+    type: "text",
+    class: "settings-input",
+    placeholder: "http://127.0.0.1:7890（留空 = 直连）",
+  });
+  const proxySave = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["保存"]);
+  const proxyStatus = el("p", { class: "settings-status" }, [""]);
+  void getProxy()
+    .then((v) => {
+      proxyInput.value = v;
+    })
+    .catch((err) => {
+      proxyStatus.textContent = `读取失败：${String(err).slice(0, 160)}`;
+    });
+  proxySave.addEventListener("click", () => {
+    proxySave.disabled = true;
+    void setProxy(proxyInput.value.trim())
+      .then(() => {
+        proxyStatus.textContent = "已保存——对之后的下载任务生效，可用镜像源的「测试」验证连通。";
+      })
+      .catch((err) => {
+        proxyStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
+      })
+      .finally(() => {
+        proxySave.disabled = false;
+      });
+  });
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["网络代理"]),
+      el("div", { class: "settings-row" }, [proxyInput, proxySave]),
+      proxyStatus,
     ]),
   );
 

@@ -37,6 +37,7 @@
   --red-light: #ff4c4c;   /* Red hover 描边 */
   --red-dark: #ce2111;    /* Red 常态描边（删除类） */
   --half-white: #ffffff55;    /* 按钮/列表常态底 */
+  --white-20: #ffffff32;     /* 窗控 hover：20% 白叠层（MyIconButton White 态，遗留①源码定值） */
   --semi-white: #ffffffbb;
   --sidebar-white: #fffffff1;
   --semi-transparent: #eaf2fe01;
@@ -50,7 +51,7 @@
   --warn-text: #b45555;   /* 启动按钮 warn 小字（phase-00:100 记录值） */
   --text-faint: #9b9b9b;  /* 启动按钮下版本小字（phase-00:100 记录值） */
   --brand-deepseek: #4d6bfe; /* DeepSeek 品牌色（厂商头像专用） */
-  --tab-active-bg: #1370f314; /* 市场 tab 选中底（S4 对照 PCL 复核） */
+  --tint-primary-8: #1370f314; /* 主色 8% 叠层（tab 选中底、启动页「去处理」钮；主题切换联动） */
 
   /* ---- 形状（G3：窗6/卡5/列表6/输入3/浮层3/胶囊13.5/弹窗7）---- */
   --radius-win: 6px;

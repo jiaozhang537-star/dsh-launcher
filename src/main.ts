@@ -1,5 +1,6 @@
 import "./styles/theme.css";
 import "./styles/main.css";
+import { initTheme } from "./lib/theme";
 import { initHintHost, showHint } from "./lib/hint";
 import { createTopbar } from "./components/topbar";
 import { launchPage } from "./routes/launch";
@@ -12,6 +13,9 @@ import { marketDetailPage } from "./routes/market-detail";
 import { tasksPage } from "./routes/tasks";
 import { mountTaskFab } from "./components/task-fab";
 import { mountRouter, registerPages } from "./router";
+
+// 首帧前套用已保存的自定义主题色（FR-11；无覆盖 = theme.css 静态默认蓝）。
+initTheme();
 
 registerPages([launchPage, downloadsPage, settingsPage, morePage, instanceSelectPage, instanceSettingsPage, marketDetailPage, tasksPage]);
 

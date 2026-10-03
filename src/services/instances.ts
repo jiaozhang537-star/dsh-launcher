@@ -13,6 +13,12 @@ export interface Instance {
   createdAt: string;
   /** 外部实例（原地引用）：绝对路径；null = 托管实例（versions/<id>/）。 */
   dir: string | null;
+  /** FR-12：启动参数覆盖；null = 无覆盖。 */
+  launchArgs: string | null;
+  /** FR-12：工作目录覆盖（绝对路径）；null = 实例内 workspace。 */
+  workDir: string | null;
+  /** FR-17：实例隔离（默认开启）；false = 插件与配置回退共享区。 */
+  isolation: boolean;
 }
 
 /** 注入配置：settings 为 DSH settings.yaml 的 JSON 形态（顶层键=插件命名空间），env 为 .env 键值。 */
@@ -21,6 +27,14 @@ export interface InjectConfig {
   env: Record<string, string>;
   /** 实例级 AGENTS.md 覆盖（版本设置页输入框）；缺省/null = 继承全局默认。 */
   agentsMd?: string | null;
+}
+
+/** FR-12/FR-17 高级设置载荷：None/空 = 清除对应覆盖。 */
+export interface AdvancedLaunchSettings {
+  /** 启动参数（空格分隔，追加在原生参数之后）；null = 清除。 */
+  launchArgs: string | null;
+  /** 工作目录覆盖（绝对路径）；null = 实例内 workspace。 */
+  workDir: string | null;
 }
 
 
@@ -58,14 +72,33 @@ export async function pickFolder(): Promise<string | null> {
   return picked;
 }
 
-/** 在文件管理器中打开实例子目录（skills / sessions / sources）。 */
-export function openInstanceSubdir(id: string, which: "skills" | "sessions" | "sources"): Promise<string> {
+/** 在文件管理器中打开实例子目录（root = 实例根 / skills / sessions / sources）。 */
+export function openInstanceSubdir(id: string, which: "root" | "skills" | "sessions" | "sources"): Promise<string> {
   return invoke<string>("instance_open_subdir", { id, which });
 }
 
 /** 删除实例（整目录移除，零残留；运行中的实例会因文件占用而失败）。 */
 export function deleteInstance(id: string): Promise<void> {
   return invoke<void>("instance_delete", { id });
+}
+
+/** 实例目录体量（FR-10 删除确认的「数据量级说明」；尽力而为参考值）。 */
+export function instanceSize(id: string): Promise<{ bytes: number; files: number }> {
+  return invoke<{ bytes: number; files: number }>("instance_size", { id });
+}
+
+/** FR-12：保存实例级高级设置（启动参数 / 工作目录；null = 清除覆盖）。 */
+export function instanceSetAdvanced(id: string, settings: AdvancedLaunchSettings): Promise<void> {
+  return invoke<void>("instance_set_advanced", {
+    id,
+    launchArgs: settings.launchArgs,
+    workDir: settings.workDir,
+  });
+}
+
+/** FR-17：切换实例隔离（后端做 junction 迁移与配置单源切换），返回人读报告。 */
+export function instanceSetIsolation(id: string, isolation: boolean): Promise<string> {
+  return invoke<string>("instance_set_isolation", { id, isolation });
 }
 
 /** 更新实例名称。 */

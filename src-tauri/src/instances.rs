@@ -46,10 +46,24 @@ pub struct Instance {
     /// 落 `versions/<id>/`。注册表是唯一事实来源。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// FR-12：启动参数覆盖（空格分隔，追加在原生参数之后）；None = 无覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_args: Option<String>,
+    /// FR-12：工作目录覆盖（绝对路径）；None = 实例内 `workspace/`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
+    /// FR-17：实例隔离（默认开启）。false = 插件目录 junction 至共享区、
+    /// 配置回退全局单源；会话与工作区仍随实例。
+    #[serde(default = "default_isolation")]
+    pub isolation: bool,
 }
 
 fn default_profile() -> String {
     "headless".to_string()
+}
+
+fn default_isolation() -> bool {
+    true
 }
 
 /// 实例的前端视图（IPC 专用）：字段键为 camelCase。
@@ -69,6 +83,9 @@ pub struct InstanceView {
     pub port: Option<u16>,
     pub created_at: String,
     pub dir: Option<String>,
+    pub launch_args: Option<String>,
+    pub work_dir: Option<String>,
+    pub isolation: bool,
 }
 
 impl From<&Instance> for InstanceView {
@@ -83,6 +100,9 @@ impl From<&Instance> for InstanceView {
             port: i.port,
             created_at: i.created_at.clone(),
             dir: i.dir.clone(),
+            launch_args: i.launch_args.clone(),
+            work_dir: i.work_dir.clone(),
+            isolation: i.isolation,
         }
     }
 }
@@ -325,6 +345,9 @@ pub fn create_instance(name: &str, profile: &str) -> Result<Instance, String> {
         port: Some(port),
         created_at: now_rfc3339(),
         dir: None,
+        launch_args: None,
+        work_dir: None,
+        isolation: true,
     };
 
     let dir = instance_dir(&id)?;
@@ -387,13 +410,14 @@ fn skills_display_dir(instance: &Instance) -> Result<PathBuf, String> {
     crate::paths::shared_skills_dir()
 }
 
-/// 打开实例子目录（2026-09-12 追加批次）：skills / sessions / sources。
-/// skills 打开**全局共享目录**（托管实例；所有实例同一份，需求变更）；
-/// sessions 缺失时先创建（空目录对 DSH 无副作用）；sources 不预建——缺失时
-/// 报可读错误。
+/// 打开实例子目录（2026-09-12 追加批次；root 为 FR-10 行内「打开目录」新增）：
+/// root = 实例根目录；skills 打开**全局共享目录**（托管实例；所有实例同一份，
+/// 需求变更）；sessions 缺失时先创建（空目录对 DSH 无副作用）；sources 不预建——
+/// 缺失时报可读错误。
 pub fn open_subdir(app: &tauri::AppHandle, id: &str, which: &str) -> Result<PathBuf, String> {
     let instance = get_instance(id)?;
     let dir = match which {
+        "root" => instance_dir(id)?,
         "skills" => skills_display_dir(&instance)?,
         "sessions" | "sources" => instance_dir(id)?.join(which),
         other => return Err(format!("未知子目录：{other:?}")),
@@ -407,6 +431,187 @@ pub fn open_subdir(app: &tauri::AppHandle, id: &str, which: &str) -> Result<Path
         .open_path(dir.display().to_string(), None::<&str>)
         .map_err(|e| format!("打开目录失败：{e}"))?;
     Ok(dir)
+}
+
+/// 实例目录体量（FR-10 删除确认的「数据量级说明」）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirStats {
+    /// 全部普通文件的总字节数。
+    pub bytes: u64,
+    /// 普通文件计数。
+    pub files: u64,
+}
+
+/// 递归统计实例目录体量：junction / 符号链接不跟随、不计入（skills 共享区
+/// 避免双算）；单条目失败跳过——量级说明是删除确认里的尽力而为参考值，
+/// 不因个别不可读条目失败。实例不存在照常 fail loud。
+pub fn dir_stats(id: &str) -> Result<DirStats, String> {
+    get_instance(id)?;
+    let root = instance_dir(id)?;
+    let mut stats = DirStats { bytes: 0, files: 0 };
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                stats.bytes += meta.len();
+                stats.files += 1;
+            }
+        }
+    }
+    Ok(stats)
+}
+
+// ===== FR-12 / FR-17：实例级高级设置与隔离开关（Phase 6 W4） =====
+
+/// FR-12：启动参数 / 工作目录覆盖（None / 空 = 清除覆盖）。
+/// 工作目录必须为绝对路径——相对路径会随启动器工作目录漂移，语义错误。
+pub fn set_advanced(
+    id: &str,
+    launch_args: Option<String>,
+    work_dir: Option<String>,
+) -> Result<(), String> {
+    get_instance(id)?;
+    let launch = launch_args
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let work = work_dir
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(dir) = &work {
+        if !Path::new(dir).is_absolute() {
+            return Err(format!("工作目录必须是绝对路径：{dir}"));
+        }
+    }
+    update_instance(id, |i| {
+        i.launch_args = launch;
+        i.work_dir = work;
+    })?;
+    Ok(())
+}
+
+/// FR-17 共享池：`shared/profiles/`（关闭隔离的实例插件目录都指向这里）。
+fn shared_profiles_dir() -> Result<PathBuf, String> {
+    let dir = crate::paths::shared_dir()?.join("profiles");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建共享插件目录失败：{e}"))?;
+    Ok(dir)
+}
+
+/// FR-17：切换实例隔离。运行中禁止切换；外部实例不参与（数据本就原地）。
+/// 返回人读报告（迁移项数、配置语义变化），前端直接呈现。
+pub fn set_isolation(id: &str, isolation: bool) -> Result<String, String> {
+    let instance = get_instance(id)?;
+    if instance.dir.is_some() {
+        return Err("外部实例的数据本就留在原地，不参与隔离开关".into());
+    }
+    if instance.isolation == isolation {
+        return Ok("隔离状态未变化".into());
+    }
+    if crate::process::is_running(id) {
+        return Err("实例运行中——先停止再切换隔离".into());
+    }
+    let report = if isolation {
+        join_isolation(id)?
+    } else {
+        leave_isolation(id)?
+    };
+    update_instance(id, |i| i.isolation = isolation)?;
+    Ok(report)
+}
+
+/// 关隔离（隔离 → 共享）：实例 `profiles/` 内容并入共享池，目录换为联接。
+/// 同名冲突的实例侧条目改名留档（`-来自<实例id>`），零丢失。
+fn leave_isolation(id: &str) -> Result<String, String> {
+    let shared = shared_profiles_dir()?;
+    let link = instance_dir(id)?.join("profiles");
+    let mut moved = 0usize;
+    let mut conflicts = 0usize;
+    if link.is_dir() && !link.is_symlink() {
+        for entry in std::fs::read_dir(&link)
+            .map_err(|e| format!("读取 {} 失败：{e}", link.display()))?
+            .flatten()
+        {
+            let target = shared.join(entry.file_name());
+            let parked = if !target.exists() {
+                target
+            } else {
+                conflicts += 1;
+                shared.join(format!(
+                    "{}-来自{}",
+                    entry.file_name().to_string_lossy(),
+                    &id[..id.len().min(12)]
+                ))
+            };
+            std::fs::rename(entry.path(), &parked)
+                .map_err(|e| format!("并入共享池失败（{}）：{e}", entry.path().display()))?;
+            moved += 1;
+        }
+        std::fs::remove_dir_all(&link).map_err(|e| format!("清理实例本地插件目录失败：{e}"))?;
+    }
+    #[cfg(windows)]
+    junction::create(&shared, &link).map_err(|e| format!("创建共享插件目录联接失败：{e}"))?;
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&shared, &link)
+        .map_err(|e| format!("创建共享插件目录符号链接失败：{e}"))?;
+    let conflict_note = if conflicts > 0 {
+        format!("，{conflicts} 项与共享池同名已改名留档")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "已切换为共享：插件目录并入共享池（迁移 {moved} 项{conflict_note}）；\
+         配置改由全局模板单源生效，重新隔离后自动恢复实例覆盖。\
+         会话与工作区仍随本实例。"
+    ))
+}
+
+/// 重开隔离（共享 → 隔离）：摘除联接，把共享池内容**复制**回实例自有目录
+///（共享池保留——其他共享实例不受影响）。
+fn join_isolation(id: &str) -> Result<String, String> {
+    let shared = shared_profiles_dir()?;
+    let link = instance_dir(id)?.join("profiles");
+    if link.is_symlink() {
+        std::fs::remove_dir(&link).map_err(|e| format!("摘除共享目录联接失败：{e}"))?;
+    }
+    let mut copied = 0usize;
+    copy_tree(&shared, &link, &mut copied)?;
+    Ok(format!(
+        "已恢复隔离：从共享池复制 {copied} 个文件到本实例（共享池保留，其他共享实例不受影响）；\
+         配置恢复「全局默认 ⊕ 本实例覆盖」。会话与工作区始终随本实例。"
+    ))
+}
+
+/// 递归复制目录内容（src → dst；联接跳过）。
+fn copy_tree(src: &Path, dst: &Path, counter: &mut usize) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建 {} 失败：{e}", dst.display()))?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| format!("读取 {} 失败：{e}", src.display()))?
+        .flatten()
+    {
+        let target = dst.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_dir() {
+            copy_tree(&entry.path(), &target, counter)?;
+        } else if file_type.is_symlink() {
+            continue;
+        } else {
+            std::fs::copy(entry.path(), &target)
+                .map_err(|e| format!("复制 {} 失败：{e}", entry.path().display()))?;
+            *counter += 1;
+        }
+    }
+    Ok(())
 }
 
 /// 「添加已有文件夹」（2026-09-12 需求方定稿：**原地引用**）：把一个既有的
@@ -474,6 +679,9 @@ pub fn register_external(folder: &str) -> Result<Instance, String> {
         port: Some(port),
         created_at: now_rfc3339(),
         dir: Some(path.display().to_string()),
+        launch_args: None,
+        work_dir: None,
+        isolation: true,
     };
 
     // 外部目录写一份启动器格式的 instance.json（便于携带与二次校验识别）；
@@ -732,11 +940,15 @@ pub(crate) mod tests {
             port: Some(3080),
             created_at: "2026-08-28T00:00:00Z".into(),
             dir: None,
+            launch_args: None,
+            work_dir: None,
+            isolation: true,
         };
         let json = serde_json::to_value(InstanceView::from(&instance)).unwrap();
         assert_eq!(json["dshVersion"], "0.1.1");
         assert_eq!(json["createdAt"], "2026-08-28T00:00:00Z");
         assert_eq!(json["lastLaunchedAt"], serde_json::Value::Null);
+        assert_eq!(json["isolation"], true, "隔离默认开启须透出前端");
         assert_eq!(json["nodeVersion"], serde_json::Value::Null);
         assert_eq!(json["port"], 3080);
         let raw = serde_json::to_string(&InstanceView::from(&instance)).unwrap();
@@ -1083,6 +1295,93 @@ pub(crate) mod tests {
         let c = create_instance("丙", "web").unwrap();
         assert_ne!(c.port, b.port);
         // 甲删乙在，丙只能拿「未被钉定」的端口；具体数值依环境而异。
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// FR-10：dir_stats 统计普通文件字节与个数；不存在的实例 fail loud。
+    #[test]
+    fn dir_stats_counts_files_and_fails_loud_on_missing_instance() {
+        let (_lock, tmp) = sandbox("dir-stats");
+        assert!(dir_stats("i-missing").is_err());
+        let inst = create_instance("量级", "web").unwrap();
+        let dir = instance_dir(&inst.id).unwrap();
+        std::fs::write(dir.join("a.bin"), vec![0u8; 100]).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("b.bin"), vec![0u8; 50]).unwrap();
+        let stats = dir_stats(&inst.id).unwrap();
+        assert!(
+            stats.bytes >= 150,
+            "普通文件字节应累计（a.bin+b.bin=150，另有实例元数据）：{}",
+            stats.bytes
+        );
+        assert!(stats.files >= 2, "至少 a.bin 与 b.bin 两文件，实际 {}", stats.files);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// FR-12：set_advanced 往返 + 工作目录绝对路径校验 + 空值清除。
+    #[test]
+    fn set_advanced_round_trip_and_rejects_relative_workdir() {
+        let (_lock, tmp) = sandbox("adv");
+        assert!(set_advanced("i-missing", None, None).is_err());
+        let inst = create_instance("高级", "web").unwrap();
+        set_advanced(&inst.id, Some(" --verbose".into()), Some(r"D:\work\dsh".into())).unwrap();
+        let got = get_instance(&inst.id).unwrap();
+        assert_eq!(got.launch_args.as_deref(), Some("--verbose"), "首尾空白应被修剪");
+        assert_eq!(got.work_dir.as_deref(), Some(r"D:\work\dsh"));
+        assert!(set_advanced(&inst.id, None, Some("relative/path".into())).is_err());
+        set_advanced(&inst.id, Some("   ".into()), None).unwrap();
+        let cleared = get_instance(&inst.id).unwrap();
+        assert!(cleared.launch_args.is_none() && cleared.work_dir.is_none(), "空串 = 清除覆盖");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// FR-17：隔离切换迁移——关隔离 = profiles 并入共享池 + 联接 + 配置单源；
+    /// 重开隔离 = 共享池内容复制回实例、实例覆盖恢复参与。
+    #[test]
+    #[cfg(windows)]
+    fn isolation_switch_migrates_profiles_and_config_semantics() {
+        let (_lock, tmp) = sandbox("isol");
+        let inst = create_instance("隔离", "web").unwrap();
+        let profiles = instance_dir(&inst.id).unwrap().join("profiles");
+        let profile_dir = profiles.join("web");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(profile_dir.join("package.json"), b"{\"name\":\"p\"}").unwrap();
+
+        // 关隔离：内容并入共享池 + 目录换联接 + 配置单源。
+        let report = set_isolation(&inst.id, false).unwrap();
+        assert!(report.contains("共享"), "实际：{report}");
+        assert!(!get_instance(&inst.id).unwrap().isolation);
+        let shared = crate::paths::shared_dir().unwrap().join("profiles");
+        assert!(shared.join("web").join("package.json").is_file(), "内容应并入共享池");
+        assert!(profiles.is_symlink(), "profiles 应为联接");
+        // 幂等性：重复关隔离不报错。
+        set_isolation(&inst.id, false).unwrap();
+
+        // 共享模式下实例覆盖不参与生效配置。
+        let mut settings = serde_json::Map::new();
+        settings.insert("custom".into(), serde_json::Value::Bool(true));
+        crate::inject::set_override(
+            &inst.id,
+            &crate::inject::InjectConfig {
+                settings,
+                env: Default::default(),
+                agents_md: None,
+            },
+        )
+        .unwrap();
+        let effective = crate::inject::effective_config(&inst.id).unwrap();
+        assert!(effective.settings.get("custom").is_none(), "共享模式应忽略实例覆盖");
+
+        // 重开隔离：共享池内容复制回实例，目录恢复真实，覆盖恢复参与。
+        set_isolation(&inst.id, true).unwrap();
+        assert!(!profiles.is_symlink());
+        assert!(profiles.join("web").join("package.json").is_file(), "共享池内容应复制回实例");
+        let effective2 = crate::inject::effective_config(&inst.id).unwrap();
+        assert_eq!(
+            effective2.settings.get("custom"),
+            Some(&serde_json::Value::Bool(true)),
+            "重新隔离后实例覆盖恢复参与"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 

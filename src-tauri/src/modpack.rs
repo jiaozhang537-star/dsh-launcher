@@ -432,7 +432,7 @@ fn export_pack_inner(
         let pack_root = temp.join("pack");
         std::fs::create_dir_all(&pack_root).map_err(|e| format!("创建暂存目录失败：{e}"))?;
         let instance = crate::instances::get_instance(&opts.instance_id)?;
-        let node_exe = crate::dsh_install::resolve_install_node(&instance, &mut |_| {})?;
+        let node_exe = crate::dsh_install::resolve_install_node(&instance, &mut |_| {}, None)?;
         let npm_cli = crate::dsh_install::npm_cli_of(&node_exe)?;
         for (idx, name) in opts.plugins.iter().enumerate() {
             let row = available
@@ -644,7 +644,7 @@ fn import_pack_inner(
                 } else {
                     format!("{}@{}", entry.name, entry.version)
                 };
-                match crate::market_install::plugin_add(instance_id, &spec, progress) {
+                match crate::market_install::plugin_add(instance_id, &spec, progress, None) {
                     Ok(outcome) => installed.push(outcome),
                     Err(e) => {
                         return Err(rollback_plugins(&installed, &e, progress));
@@ -678,7 +678,8 @@ fn import_pack_inner(
             // tarball 时回落到解开 package/ 目录再 file:（罕见路径，真实环境
             // 未观测到触发；其 spec 指向导入暂存区，导入后即失效）。
             let spec = format!("file:{}", persistent.display());
-            let outcome = match crate::market_install::plugin_add(instance_id, &spec, progress) {
+            let outcome = match crate::market_install::plugin_add(instance_id, &spec, progress, None)
+            {
                 Ok(outcome) => Ok(outcome),
                 Err(first_err) => {
                     progress("file: 直装 tarball 失败，回落为解包目录安装…".into());
@@ -687,6 +688,7 @@ fn import_pack_inner(
                         instance_id,
                         &format!("file:{}", dir.display()),
                         progress,
+                        None,
                     ) {
                         Ok(outcome) => Ok(outcome),
                         Err(_) => Err(first_err),

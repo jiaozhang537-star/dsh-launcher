@@ -83,6 +83,7 @@ pub fn installed_bin_js(instance_id: &str) -> Result<Option<PathBuf>, String> {
 pub(crate) fn resolve_install_node(
     instance: &instances::Instance,
     progress: &mut dyn FnMut(InstallStage),
+    control: Option<&crate::task_queue::TaskControl>,
 ) -> Result<PathBuf, String> {
     if let Some(configured) = instance
         .node_version
@@ -101,25 +102,28 @@ pub(crate) fn resolve_install_node(
         // 版本不合格：不中断，继续走自动代管兜底（错误信息随下载失败一并可见）。
     }
 
-    let exe = node_runtime::ensure_default_node(&mut |event| {
-        let (detail, received, total) = match event {
-            node_runtime::EnsureEvent::Downloading { version } => (
-                format!("未检测到可用的 Node 运行时，开始自动下载便携版 Node v{version}…"),
-                0,
-                0,
-            ),
-            node_runtime::EnsureEvent::Bytes { received, total } => (
-                format!(
-                    "正在自动下载 Node 运行时（{} / {}）",
-                    node_runtime::fmt_size(received),
-                    node_runtime::fmt_size(total)
+    let exe = node_runtime::ensure_default_node(
+        &mut |event| {
+            let (detail, received, total) = match event {
+                node_runtime::EnsureEvent::Downloading { version } => (
+                    format!("未检测到可用的 Node 运行时，开始自动下载便携版 Node v{version}…"),
+                    0,
+                    0,
                 ),
-                received,
-                total,
-            ),
-        };
-        progress(InstallStage::AutoNode { detail, received, total });
-    })?;
+                node_runtime::EnsureEvent::Bytes { received, total } => (
+                    format!(
+                        "正在自动下载 Node 运行时（{} / {}）",
+                        node_runtime::fmt_size(received),
+                        node_runtime::fmt_size(total)
+                    ),
+                    received,
+                    total,
+                ),
+            };
+            progress(InstallStage::AutoNode { detail, received, total });
+        },
+        control,
+    )?;
     Ok(exe)
 }
 
@@ -185,10 +189,13 @@ pub fn valid_dsh_version(version: &str) -> bool {
 }
 
 /// 幂等性：重复安装同版本 = npm 覆盖重装，成功后覆盖 `instance.dsh_version`。
+/// `control` = 任务控制柄：npm 链支持**取消**（杀进程，检查点 ≤0.5s 生效），
+/// 暂停/继续不适用于子进程链（前端按钮按 canPause=false 隐藏）。
 pub fn install(
     instance_id: &str,
     version: &str,
     progress: &mut dyn FnMut(InstallStage),
+    control: Option<&crate::task_queue::TaskControl>,
 ) -> Result<InstallOutcome, String> {
     if !valid_dsh_version(version) {
         return Err(format!(
@@ -196,9 +203,12 @@ pub fn install(
         ));
     }
     progress(InstallStage::Preparing);
+    if let Some(control) = control {
+        control.checkpoint()?;
+    }
 
     let instance = instances::get_instance(instance_id)?;
-    let node_exe = resolve_install_node(&instance, progress)?;
+    let node_exe = resolve_install_node(&instance, progress, control)?;
     let npm_cli = npm_cli_of(&node_exe)?;
     let app = app_dir(instance_id)?;
     std::fs::create_dir_all(&app).map_err(|e| format!("创建安装区 {} 失败：{e}", app.display()))?;
@@ -210,7 +220,10 @@ pub fn install(
 
     let mut attempts: Vec<String> = Vec::new();
     for registry_base in gateway::npm_registry_bases() {
-        match run_npm_install(&node_exe, &npm_cli, &app, &spec, registry_base, progress) {
+        if let Some(control) = control {
+            control.checkpoint()?;
+        }
+        match run_npm_install(&node_exe, &npm_cli, &app, &spec, registry_base, progress, control) {
             Ok(()) => break,
             Err(e) => attempts.push(format!("[通道 {registry_base}] {e}")),
         }
@@ -222,6 +235,9 @@ pub fn install(
         ));
     }
 
+    if let Some(control) = control {
+        control.checkpoint()?;
+    }
     progress(InstallStage::Verifying);
     let bin_js = installed_bin_js(instance_id)?
         .ok_or_else(|| format!("安装完成但未找到 {DSH_PACKAGE}/lib/bin.js——产物异常"))?;
@@ -239,6 +255,9 @@ pub fn install(
     }
 
     // 装后复验：bin.js --version 输出必须等于请求版本。
+    if let Some(control) = control {
+        control.checkpoint()?;
+    }
     let out = Command::new(&node_exe)
         .arg(&bin_js)
         .arg("--version")
@@ -271,6 +290,7 @@ pub fn install(
 ///
 /// 进度事件：首个事件点名通道（「正在从 {registry} 安装 …」，前端存为常驻行），
 /// 之后每 10 行输出推一次最近动作。看门狗 900s 纯兜底（慢而活的安装不误杀）。
+/// `control` = 取消检查点：每 500ms tick 一次，命中即杀进程树并返回取消错误。
 fn run_npm_install(
     node_exe: &Path,
     npm_cli: &Path,
@@ -278,6 +298,7 @@ fn run_npm_install(
     spec: &str,
     registry_base: &str,
     progress: &mut dyn FnMut(InstallStage),
+    control: Option<&crate::task_queue::TaskControl>,
 ) -> Result<(), String> {
     let mut cmd = Command::new(node_exe);
     cmd.arg(npm_cli)
@@ -294,6 +315,11 @@ fn run_npm_install(
         ])
         .env("npm_config_registry", registry_base)
         .env("npm_config_update_notifier", "false");
+    // FR-11 代理：npm 子进程经 npm_config_* 感知启动器代理设置。
+    if let Some(proxy) = node_runtime::launcher_proxy() {
+        cmd.env("npm_config_proxy", &proxy)
+            .env("npm_config_https_proxy", &proxy);
+    }
     if let Some(node_dir) = node_exe.parent() {
         // npm 内部会再拉起 node；把它放到 PATH 首位保证同版本。
         let prepend = format!("{};{}", node_dir.display(), std::env::var("PATH").unwrap_or_default());
@@ -341,7 +367,18 @@ fn run_npm_install(
     let mut tail = OutputTail::new(30);
     let mut last_output = std::time::Instant::now();
     loop {
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        // 取消检查点：500ms tick 保证取消快速生效（kill 子进程树就地收尾）。
+        if let Some(control) = control {
+            if let Err(e) = control.checkpoint() {
+                let _ = child.kill();
+                for handle in readers {
+                    let _ = handle.join();
+                }
+                let _ = child.wait();
+                return Err(e);
+            }
+        }
+        match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(line) => {
                 last_output = std::time::Instant::now();
                 tail.push(line.clone());
@@ -420,7 +457,7 @@ mod tests {
         // 未创建实例 → get_instance 报错（不触碰磁盘外的东西）。
         let (_lock, tmp) = crate::instances::tests::sandbox("install-noinst");
         let mut sink = |_stage: InstallStage| {};
-        assert!(install("i-missing", "0.1.1-rc.2", &mut sink).is_err());
+        assert!(install("i-missing", "0.1.1-rc.2", &mut sink, None).is_err());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

@@ -35,11 +35,16 @@ flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI（CryptProtectData/CryptUnprotectData）用于 API Key 加密落盘（FR-06）；
-# Threading 用于按 pid 查询进程存活与镜像名（孤儿实例进程识别）。
+# Threading 用于按 pid 查询进程存活与镜像名（孤儿实例进程识别）；
+# WindowsAndMessaging 用于窗口守卫子类化（SetWindowLongPtrW/CallWindowProcW，
+# 禁止最大化：拦 SC_MAXIMIZE 与标题栏双击，见 lib.rs window_guard）。
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
 ] }
 # 目录联接（junction）：skills 全局共享挂载（std 的 junction API 仍不稳定）。
 # MIT/Apache-2.0。

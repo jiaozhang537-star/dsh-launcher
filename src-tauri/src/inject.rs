@@ -142,9 +142,14 @@ pub fn set_override(id: &str, config: &InjectConfig) -> Result<(), String> {
 }
 
 /// 计算生效配置 = 全局默认 ⊕ 实例覆盖（覆盖优先）。
+/// FR-17 共享模式（isolation=false）：配置回退全局单源——实例覆盖
+///（settings / env / AGENTS.md）不参与，覆盖文件原样保留、重新隔离后自动恢复。
 pub fn effective_config(id: &str) -> Result<InjectConfig, String> {
-    instances::get_instance(id)?;
+    let instance = instances::get_instance(id)?;
     let mut merged = get_default_template()?;
+    if !instance.isolation {
+        return Ok(merged);
+    }
     let over = get_override(id)?;
     let mut settings = Value::Object(merged.settings.clone());
     deep_merge(&mut settings, Value::Object(over.settings));

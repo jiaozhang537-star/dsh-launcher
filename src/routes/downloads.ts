@@ -20,7 +20,7 @@ import {
   onInstallProgress,
   type DshVersion,
 } from "../services/dshInstall";
-import { getTask, progressMatchesSpec, recordProgress, updateTask, upsertTask, type DownloadTask } from "../lib/downloadTasks";
+import { getTask, progressMatchesSpec, recordProgress, terminalFailure, updateTask, upsertTask, type DownloadTask } from "../lib/downloadTasks";
 import { downloadSourceArchive } from "../services/sourceArchive";
 import { onPluginProgress } from "../services/plugins";
 import { onSkillProgress } from "../services/skills";
@@ -104,7 +104,8 @@ export function fmtElapsed(startedAt: number): string {
 }
 
 /** 任务卡的进度描述：每个阶段都说清「在干嘛 + 到哪了」。 */
-/** 创建实例后的安装任务：状态写入全局 store，由订阅者渲染。 */
+/** 创建实例后的安装任务：状态写入全局 store，由订阅者渲染。
+ *  FR-09：kind=install（npm 子进程链——可取消、不可暂停）。 */
 export async function startInstall(instanceId: string, name: string, version: string): Promise<void> {
   if (getTask(instanceId)?.status === "running") return; // 同实例已在安装，防双击重入（审查 R1）
   upsertTask({
@@ -118,17 +119,20 @@ export async function startInstall(instanceId: string, name: string, version: st
     total: 0,
     speed: null,
     startedAt: Date.now(),
+    kind: "install",
+    canPause: false,
   });
   try {
     await installDsh(instanceId, version);
     updateTask(instanceId, { status: "done", phase: "done", detail: "" });
   } catch (err) {
-    updateTask(instanceId, { status: "failed", phase: "failed", detail: String(err).slice(0, 400) });
+    updateTask(instanceId, terminalFailure(err));
   }
 }
 
 /** 源码归档下载任务（FR-22）：合成 key 进同一任务 store，与实例任务卡并列。
- *  `instanceId` = 随实例落版本目录；null = 落全局 sources/。 */
+ *  `instanceId` = 随实例落版本目录；null = 落全局 sources/。
+ *  FR-09：kind=source（字节流——可暂停/继续/取消，断点续传）。 */
 export async function startSourceDownload(version: string, instanceId: string | null = null): Promise<void> {
   const key = sourceTaskKey(version, instanceId);
   if (getTask(key)?.status === "running") return; // 同一落点同版本已在下载，不重复发起
@@ -143,6 +147,8 @@ export async function startSourceDownload(version: string, instanceId: string | 
     total: 0,
     speed: null,
     startedAt: Date.now(),
+    kind: "source",
+    canPause: true,
   });
   try {
     await downloadSourceArchive(version, instanceId, ({ version: eventVersion, instanceId: eventInstance, received, total }) => {
@@ -151,7 +157,7 @@ export async function startSourceDownload(version: string, instanceId: string | 
     });
     updateTask(key, { status: "done", phase: "done", detail: "" });
   } catch (err) {
-    updateTask(key, { status: "failed", phase: "failed", detail: String(err).slice(0, 400) });
+    updateTask(key, terminalFailure(err));
   }
 }
 

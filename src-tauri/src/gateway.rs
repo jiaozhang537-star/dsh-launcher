@@ -111,6 +111,22 @@ pub fn node_dist_bases() -> Vec<&'static str> {
     vec![NODE_DIST_NPMMIRROR, NODE_DIST_OFFICIAL]
 }
 
+/// 统一 HTTP agent 构建（FR-11 代理设置）：全部 ureq 调用经此取 agent 基座，
+/// 代理来自启动器配置（`LauncherConfig.proxy`）；配置缺失 / 为空 / 非法时
+/// 静默回落直连。超时参数由调用方按场景追加。
+pub fn base_agent() -> ureq::AgentBuilder {
+    let builder = ureq::AgentBuilder::new();
+    let proxy = crate::node_runtime::load_config()
+        .ok()
+        .and_then(|c| c.proxy)
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    match proxy.and_then(|p| ureq::Proxy::new(&p).ok()) {
+        Some(p) => builder.proxy(p),
+        None => builder,
+    }
+}
+
 /// 单个探测点的结果行。
 struct ProbeLine {
     ok: bool,
@@ -120,7 +136,7 @@ struct ProbeLine {
 
 /// 对单个 URL 做一次真实 GET 探测：任意 HTTP 状态都算可达。
 fn probe_url(url: &str) -> ProbeLine {
-    let agent = ureq::AgentBuilder::new()
+    let agent = base_agent()
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(20))
         .build();

@@ -7,11 +7,31 @@
  */
 
 import type { Instance } from "../services/instances";
+import { loadFavorites } from "./instanceFavorites";
 
 /** 「最近使用置顶」排序：lastLaunchedAt 优先，其次 createdAt，均缺回落空串。 */
 export function sortInstancesByRecency(list: Instance[]): Instance[] {
   const keyOf = (inst: Instance): string => inst.lastLaunchedAt ?? inst.createdAt ?? "";
   return [...list].sort((a, b) => keyOf(b).localeCompare(keyOf(a)));
+}
+
+/**
+ * FR-10 置顶排序（2026-09-30 裁决：收藏 = 置顶，两概念合一，不新增 pinned 字段）：
+ * 收藏的实例按收藏先后置顶，其余按最近使用。favorites 可注入（vitest 用），
+ * 缺省读 localStorage。启动页默认选中与列表序共用此口径。
+ */
+export function sortInstancesForLaunch(
+  list: Instance[],
+  favorites: readonly string[] = loadFavorites(),
+): Instance[] {
+  const rankOf = (id: string): number => {
+    const idx = favorites.indexOf(id);
+    return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
+  };
+  const keyOf = (inst: Instance): string => inst.lastLaunchedAt ?? inst.createdAt ?? "";
+  return [...list].sort(
+    (a, b) => rankOf(a.id) - rankOf(b.id) || keyOf(b).localeCompare(keyOf(a)),
+  );
 }
 
 /**

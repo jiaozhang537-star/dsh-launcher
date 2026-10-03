@@ -50,6 +50,14 @@ fn running() -> &'static Mutex<HashMap<String, RunningEntry>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 实例是否在运行（FR-17 隔离切换等外部模块的守卫用；不暴露运行表内部类型）。
+pub(crate) fn is_running(instance_id: &str) -> bool {
+    running()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains_key(instance_id)
+}
+
 fn sentinels() -> &'static Mutex<HashMap<String, SentinelSession>> {
     static SESSIONS: OnceLock<Mutex<HashMap<String, SentinelSession>>> = OnceLock::new();
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -532,7 +540,16 @@ pub fn launch(
     }
     let (port, reanchored) = resolve_port(instance.port, &taken, keep_pinned_port)?;
 
-    let workspace = workspace_dir(instance_id)?;
+    let workspace = match instance.work_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // FR-12 工作目录覆盖：绝对路径（set_advanced 已校验），缺失即创建。
+        Some(custom) => {
+            let dir = PathBuf::from(custom);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("创建工作区 {} 失败：{e}", dir.display()))?;
+            dir
+        }
+        None => workspace_dir(instance_id)?,
+    };
 
     // 插件清单基线：拉起那一刻的戳，之后任何启停/安装都会让现值偏离它。
     let manifest_stamp = instances::profile_manifest_stamp(instance_id)?;
@@ -542,6 +559,10 @@ pub fn launch(
         .args(["--profile", &instance.profile, "--port", &port.to_string(), "--no-open"])
         .current_dir(&workspace)
         .env("DSH_HOME", instances::instance_dir(instance_id)?);
+    // FR-12 启动参数覆盖：实例自定义参数追加在原生参数之后（空白分隔）。
+    if let Some(extra) = instance.launch_args.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.args(extra.split_whitespace());
+    }
     // Key 注入通道（R-2.3 裁决）：逐「启用且有 Key」厂商注入其环境变量；
     // 明文只在内存中传递，绝不落盘。多厂商并存注入，实例用哪家模型由
     // 实例注入的默认模型决定。变量名与路由 apiKeyEnv 共用 keyvault::env_name_of
@@ -1121,6 +1142,9 @@ mod tests {
                 port: Some(port),
                 created_at: "2026-09-08T00:00:00Z".into(),
                             dir: None,
+                launch_args: None,
+                work_dir: None,
+                isolation: true,
             }],
         };
         instances::save_registry(&registry).unwrap();

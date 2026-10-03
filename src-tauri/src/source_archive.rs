@@ -11,8 +11,8 @@
 //!
 //! 边界（需求方拍板）：这是「可选项」，默认下载路径仍是创建实例；源码归档
 //! 启动器**不安装、不管理、不可用于启动**——产物只是一份静态参考源码树。
-//! 下载经统一下载网关（GitHub 类 URL，custom 前缀生效），取消与停滞看门狗
-//! 复用 node_runtime 的 DOWNLOAD_CANCEL。
+//! 下载经统一下载网关（GitHub 类 URL，custom 前缀生效），暂停 / 继续 / 取消
+//! 与断点续传由 task_queue 控制柄 + `.part` 断点承载（FR-09 W1）。
 
 use std::path::{Path, PathBuf};
 
@@ -80,13 +80,21 @@ pub fn delete_instance_sources(instance_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 任务键（与前端任务 store 的合成 key 完全一致，FR-09 控制柄以此对齐）：
+/// `source-<scope>-<version>`——scope = 实例 id 或 `global`。
+pub fn task_key(version: &str, instance_id: Option<&str>) -> String {
+    format!("source-{}-{version}", instance_id.unwrap_or("global"))
+}
+
 /// 下载并解压指定版本的源码归档（阻塞调用——command 侧放 spawn_blocking）。
 /// `instance_id` = Some 时落版本目录（已存在即报错，不覆盖）；None 时落全局
 /// `sources/<tag>/`（重名自动加副本后缀）。成功返回解压后的源码目录；
-/// `progress` 每 ≥256KB 回调一次 (received, total)。
+/// `progress` 每 ≥256KB 回调一次 (received, total)；
+/// `control` = 任务控制柄（暂停 / 继续 / 取消）。
 pub fn download(
     version: &str,
     instance_id: Option<&str>,
+    control: Option<&crate::task_queue::TaskControl>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<PathBuf, String> {
     let tag = dsh_source_tag(version)?;
@@ -111,7 +119,8 @@ pub fn download(
         .ok_or_else(|| "内部错误：源码目标目录缺少父级".to_string())?;
     std::fs::create_dir_all(&parent).map_err(|e| format!("创建 {} 失败：{e}", parent.display()))?;
 
-    match node_runtime::try_download(&url, &format!("{tag}.zip"), progress) {
+    let part = crate::task_queue::part_path(&task_key(version, instance_id));
+    match node_runtime::try_download(&url, &part, control, progress) {
         Ok(zip_path) => {
             extract_zip_to(&zip_path, &target)?;
             let _ = std::fs::remove_file(&zip_path);
@@ -331,7 +340,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("keep"), b"x").unwrap();
         let mut sink = |_r: u64, _t: u64| {};
-        let err = download("0.1.1-rc.2", Some(&instance.id), &mut sink).unwrap_err();
+        let err = download("0.1.1-rc.2", Some(&instance.id), None, &mut sink).unwrap_err();
         assert!(err.contains("已下载过源码"), "实际错误：{err}");
         assert!(dir.join("keep").exists(), "既有内容不得被覆盖");
         std::fs::remove_dir_all(&tmp).ok();
@@ -342,7 +351,7 @@ mod tests {
     fn instance_sources_requires_existing_instance() {
         let (_lock, _tmp) = crate::instances::tests::sandbox("source-noinst");
         let mut sink = |_r: u64, _t: u64| {};
-        let err = download("0.1.1-rc.2", Some("i-missing"), &mut sink).unwrap_err();
+        let err = download("0.1.1-rc.2", Some("i-missing"), None, &mut sink).unwrap_err();
         assert!(err.contains("实例"), "实际错误：{err}");
     }
 
@@ -354,7 +363,7 @@ mod tests {
     fn real_download_extracts_source_tree_with_apps_cli() {
         let (_lock, tmp) = crate::instances::tests::sandbox("source-real");
         let mut events = 0usize;
-        let dir = download("0.1.1-rc.2", None, &mut |received, total| {
+        let dir = download("0.1.1-rc.2", None, None, &mut |received, total| {
             events += 1;
             println!("[源码] 进度 #{events}: {received}/{total} 字节");
         })
@@ -370,7 +379,7 @@ mod tests {
     fn real_download_without_tag_fails_readable() {
         let (_lock, tmp) = crate::instances::tests::sandbox("source-404");
         let mut sink = |_r: u64, _t: u64| {};
-        let err = download("0.1.0-rc.1", None, &mut sink).unwrap_err();
+        let err = download("0.1.0-rc.1", None, None, &mut sink).unwrap_err();
         assert!(err.contains("源码 tag"), "实际错误：{err}");
         std::fs::remove_dir_all(&tmp).ok();
     }

@@ -434,6 +434,7 @@ pub fn route_report(instance_id: &str) -> Result<RouteReport, String> {
 /// settings.yaml 由 inject 引擎再生，直改会被下一次再生抹掉）。外来路由
 /// （非启动器管理键）原样保留。幂等：内容不变时也安全重写。
 pub fn sync_instance(instance_id: &str) -> Result<(), String> {
+    let instance = crate::instances::get_instance(instance_id)?;
     let existing = existing_providers(instance_id)?;
     let desire = desired_routes(&existing)?;
 
@@ -445,7 +446,13 @@ pub fn sync_instance(instance_id: &str) -> Result<(), String> {
         providers.insert(key, value);
     }
 
-    let mut config = crate::inject::get_override(instance_id)?;
+    // FR-17 共享模式：配置单源全局——路由写进全局默认模板（实例覆盖暂不参与，
+    // 重新隔离后恢复实例级路由）。
+    let mut config = if instance.isolation {
+        crate::inject::get_override(instance_id)?
+    } else {
+        crate::inject::get_default_template()?
+    };
     if providers.is_empty() {
         config.settings.remove("llm-pi-ai");
     } else {
@@ -460,7 +467,11 @@ pub fn sync_instance(instance_id: &str) -> Result<(), String> {
             .settings
             .insert("llm-pi-ai".into(), Value::Object(namespace));
     }
-    crate::inject::set_override(instance_id, &config)?;
+    if instance.isolation {
+        crate::inject::set_override(instance_id, &config)?;
+    } else {
+        crate::inject::set_default_template(&config)?;
+    }
     crate::inject::write_instance_files(instance_id)?;
     Ok(())
 }

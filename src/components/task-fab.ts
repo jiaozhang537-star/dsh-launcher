@@ -8,11 +8,11 @@
 import { el } from "../lib/dom";
 import { icon } from "../lib/icons";
 import { navigate, pageById } from "../router";
-import { getTasks, subscribeTasks, type DownloadTask } from "../lib/downloadTasks";
+import { getTasks, isTaskActive, subscribeTasks, type DownloadTask } from "../lib/downloadTasks";
 
-/** 汇总进度：有字节量的运行中任务取均值；无可量化任务时 0（纯图标态）。 */
-function overallProgress(running: DownloadTask[]): number {
-  const withTotal = running.filter((t) => t.total > 0);
+/** 汇总进度：有字节量的活动任务（运行+暂停）取均值；无可量化任务时 0。 */
+function overallProgress(active: DownloadTask[]): number {
+  const withTotal = active.filter((t) => t.total > 0);
   if (withTotal.length === 0) return 0;
   const avg =
     withTotal.reduce((acc, t) => acc + Math.min(100, (t.received / t.total) * 100), 0) /
@@ -33,21 +33,20 @@ export function mountTaskFab(host: HTMLElement): void {
   fab.addEventListener("click", () => navigate("tasks"));
   host.append(fab);
 
-  let prevRunning = -1;
+  let prevActive = -1;
   const paint = (): void => {
-    const tasks = getTasks();
-    const running = tasks.filter((t) => t.status === "running");
+    const active = getTasks().filter(isTaskActive);
     const onPage = pageById("tasks") !== undefined && location.hash === "#/tasks";
-    const show = running.length > 0 && !onPage;
+    const show = active.length > 0 && !onPage;
     fab.classList.toggle("task-fab--show", show);
-    fill.style.height = `${overallProgress(running)}%`;
+    fill.style.height = `${overallProgress(active)}%`;
     // 状态跃迁（新任务出现/全部落定）触发波纹（PCL Ribble 同款）。
-    if (prevRunning !== running.length && show) {
+    if (prevActive !== active.length && show) {
       ripple.classList.remove("task-fab__ripple--go");
       void ripple.offsetWidth;
       ripple.classList.add("task-fab__ripple--go");
     }
-    prevRunning = running.length;
+    prevActive = active.length;
   };
   subscribeTasks(() => paint());
   // hash 变化也要重算显隐（进任务页时隐藏）——router 无公开 hash 订阅，

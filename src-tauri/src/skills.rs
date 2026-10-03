@@ -290,14 +290,19 @@ pub fn install(
     let settings = mirror_config::load()?;
     let url = gateway::resolve(&archive_url(&repo, &branch), &settings)?;
     let zip_name = format!("skill-{}.zip", repo.replace('/', "-"));
-    let zip_path = node_runtime::try_download(&url, &zip_name, &mut |received, total| {
-        if total > 0 {
-            let pct = received * 100 / total;
-            if pct % 10 == 0 {
-                progress(format!("下载中 {pct}%"));
+    let zip_path = node_runtime::try_download(
+        &url,
+        &std::env::temp_dir().join(&zip_name),
+        None,
+        &mut |received, total| {
+            if total > 0 {
+                let pct = received * 100 / total;
+                if pct % 10 == 0 {
+                    progress(format!("下载中 {pct}%"));
+                }
             }
-        }
-    })
+        },
+    )
     .map_err(|e| format!("下载技能仓库失败：{e}"))?;
 
     // 解压到实例内 staging（同盘保证可原子改名），扫完即清。
@@ -593,7 +598,7 @@ mod tests {
             .join("lib")
             .join("index.js");
         assert!(sf_lib.is_file(), "实例缺 skill-filesystem：{}", sf_lib.display());
-        let node_exe = crate::dsh_install::resolve_install_node(&target, &mut |_stage| {})
+        let node_exe = crate::dsh_install::resolve_install_node(&target, &mut |_stage| {}, None)
             .expect("无可用 Node");
 
         let home = crate::instances::instance_dir(&target.id).unwrap();

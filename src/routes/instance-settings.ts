@@ -6,6 +6,8 @@ import type { PageDefinition } from "../router";
 import {
   getInjectOverride,
   getGlobalAgentsMd,
+  instanceSetAdvanced,
+  instanceSetIsolation,
   listInstances,
   openInstanceSubdir,
   renameInstance,
@@ -313,12 +315,15 @@ export const instanceSettingsPage: PageDefinition = {
         try {
           const [over, global] = await Promise.all([getInjectOverride(inst.id), getGlobalAgentsMd()]);
           const own = over.agentsMd ?? null;
-          agentsArea.value = own ?? global ?? "";
+          // 输入框只显示实例自己的覆盖，不得回填全局内容：回填会把「继承全局」
+          // 伪装成实例设置——删除后重进输入框又出现全局文字，读作「删了又回来」
+          // （2026-10-03 需求方报障「AGENTS 是假的」）。继承态 = 空框 + 状态行说明。
+          agentsArea.value = own ?? "";
           agentsStatus.textContent =
             own != null
               ? "当前：实例独立内容——覆盖全局（非叠加）；修改即保存并即时物化。"
               : global
-                ? "当前：继承全局默认——修改即转为实例独立内容并即时物化。"
+                ? "当前：未单独设置——启动时按全局 AGENTS.md 写入本版本（全局内容见 设置 > 配置）；在此输入即转为本版本独立内容。"
                 : "当前：全局与实例均未设置。";
         } catch (err) {
           agentsStatus.textContent = `读取失败：${String(err).slice(0, 240)}`;
@@ -327,12 +332,99 @@ export const instanceSettingsPage: PageDefinition = {
         }
       }
 
+      // FR-12：启动参数 / 工作目录覆盖（下次启动生效）。
+      const argsInput = el("input", {
+        type: "text",
+        class: "settings-input",
+        value: inst.launchArgs ?? "",
+        placeholder: "如 --verbose（空格分隔；留空 = 无附加参数）",
+      });
+      const workInput = el("input", {
+        type: "text",
+        class: "settings-input",
+        value: inst.workDir ?? "",
+        placeholder: "绝对路径（留空 = 实例内 workspace）",
+      });
+      const advStatus = el("p", { class: "settings-path" }, [""]);
+      const advSave = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["保存"]);
+      advSave.addEventListener("click", () => {
+        advSave.disabled = true;
+        void instanceSetAdvanced(inst.id, {
+          launchArgs: argsInput.value.trim() || null,
+          workDir: workInput.value.trim() || null,
+        })
+          .then(() => {
+            advStatus.textContent = "已保存——下次启动该版本时生效。";
+          })
+          .catch((err) => {
+            advStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
+          })
+          .finally(() => {
+            advSave.disabled = false;
+          });
+      });
+
+      // FR-17：实例隔离开关（两击确认——影响明示后再执行；运行中由后端拒绝）。
+      const isoStatus = el("p", { class: "settings-path" }, [""]);
+      const isoBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, [""]);
+      let armed = false;
+      let disarmTimer: ReturnType<typeof setTimeout> | undefined;
+      const syncIso = (): void => {
+        isoBtn.textContent = armed ? "确认切换？" : inst.isolation ? "关闭隔离" : "开启隔离";
+        isoStatus.textContent = armed
+          ? inst.isolation
+            ? "关闭后：插件目录并入共享区（与其他关闭隔离的实例共用，同名内容改名留档）；配置改由全局模板单源；会话与工作区仍独立。运行中的实例需先停止。"
+            : "开启后：从共享池复制一份插件到本实例（共享池保留）；配置恢复「全局默认 ⊕ 本实例覆盖」。"
+          : inst.isolation
+            ? "当前：隔离——插件与配置独立于其他实例。"
+            : "当前：共享——插件目录联接至共享池，配置单源全局模板（实例覆盖暂不参与）。";
+      };
+      syncIso();
+      isoBtn.addEventListener("click", () => {
+        if (!armed) {
+          armed = true;
+          syncIso();
+          disarmTimer = setTimeout(() => {
+            armed = false;
+            syncIso();
+          }, 6000);
+          return;
+        }
+        clearTimeout(disarmTimer);
+        armed = false;
+        isoBtn.disabled = true;
+        void instanceSetIsolation(inst.id, !inst.isolation)
+          .then((report) => {
+            inst.isolation = !inst.isolation;
+            isoStatus.textContent = report;
+            syncIso();
+          })
+          .catch((err) => {
+            isoStatus.textContent = `切换失败：${String(err).slice(0, 200)}`;
+          })
+          .finally(() => {
+            isoBtn.disabled = false;
+          });
+      });
+
       rightArea.append(
         el("section", { class: "card settings-card" }, [
           el("h2", { class: "card__title" }, ["AGENTS.md"]),
           el("p", { class: "settings-path" }, ["未单独设置时使用全局 AGENTS.md；局部设置覆盖全局。"]),
           agentsArea,
           agentsStatus,
+        ]),
+        el("section", { class: "card settings-card" }, [
+          el("h2", { class: "card__title" }, ["启动参数与工作目录"]),
+          el("div", { class: "settings-row" }, [el("span", {}, ["启动参数："]), argsInput]),
+          el("div", { class: "settings-row" }, [el("span", {}, ["工作目录："]), workInput]),
+          el("div", { class: "settings-row" }, [advSave]),
+          advStatus,
+        ]),
+        el("section", { class: "card settings-card" }, [
+          el("h2", { class: "card__title" }, ["实例隔离"]),
+          el("div", { class: "settings-row" }, [isoBtn]),
+          isoStatus,
         ]),
       );
       void loadAgentsState();

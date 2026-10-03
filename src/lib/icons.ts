@@ -11,7 +11,7 @@ export type IconName =
   | "back" | "win-min" | "win-close" | "trash" | "check" | "x" | "download"
   | "plus" | "spinner" | "star" | "arrow-up" | "globe" | "pen" | "heart"
   | "gear" | "import" | "warning" | "external-link" | "folder" | "refresh"
-  | "chevron-down";
+  | "chevron-down" | "pause" | "play";
 
 /** 每枚图标的路径组（多段 path，均为描边）。 */
 const PATHS: Record<IconName, string[]> = {
@@ -61,6 +61,8 @@ const PATHS: Record<IconName, string[]> = {
   folder: ["M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2.5h8A1.5 1.5 0 0 1 20.5 10v8A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"],
   refresh: ["M20 12a8 8 0 1 1-2.3-5.6", "M20 3.5V7h-3.5"],
   "chevron-down": ["M5 9l7 7 7-7"],
+  pause: ["M9 5.5v13", "M15 5.5v13"],
+  play: ["M8 5.5L18.5 12L8 18.5z"],
 };
 
 /** 生成线框图标元素；颜色随 currentColor，尺寸默认 16。 */

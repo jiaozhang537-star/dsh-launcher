@@ -10,24 +10,9 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::paths;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 进度事件名（前端 listen 用）。
 pub const PROGRESS_EVENT: &str = "node-download-progress";
-
-/// Node 下载取消标志（全局）：手动「下载并托管」与安装链 AutoNode 共用。
-/// 边界：两条链并发下载时取消会同时中止两者——前端只在手动下载处暴露
-/// 取消按钮，内测期可接受；标志在每个下载入口统一重置。
-static DOWNLOAD_CANCEL: AtomicBool = AtomicBool::new(false);
-
-/// 请求中止进行中的 Node 下载（至多在下一次读取返回时生效）。
-pub fn cancel_download() {
-    DOWNLOAD_CANCEL.store(true, Ordering::Relaxed);
-}
-
-fn download_cancelled() -> bool {
-    DOWNLOAD_CANCEL.load(Ordering::Relaxed)
-}
 
 /// 系统 Node 检测结果（IPC 视图；键为 camelCase，与前端 `meetsRange` 对齐）。
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +32,16 @@ pub struct LauncherConfig {
     /// 全局默认托管 Node 版本；None = 尚未代管任何版本。
     #[serde(default)]
     pub default_node_version: Option<String>,
+    /// 下载任务并发上限（FR-09 队列 / FR-11 设置项；None = 默认 3，收敛 1~10）。
+    #[serde(default)]
+    pub max_downloads: Option<u32>,
+    /// HTTP(S) 代理（FR-11，形如 `http://127.0.0.1:7890`）；None/空 = 直连。
+    /// 作用于全部 ureq 取数（统一经 gateway::base_agent）与 npm 子进程链。
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// 自更新源（FR-13，`owner/repo`）；None/空 = 未配置（检查更新如实报告）。
+    #[serde(default)]
+    pub update_repo: Option<String>,
 }
 
 /// 解析 `vX.Y.Z` 形式的版本输出为 (major, minor, patch)。
@@ -167,6 +162,16 @@ pub fn load_config() -> Result<LauncherConfig, String> {
     serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败：{e}", file.display()))
 }
 
+/// 代理设置（FR-11）：空串归一为 None；ureq（gateway::base_agent）与
+/// npm 子进程链共用同一来源。
+pub fn launcher_proxy() -> Option<String> {
+    load_config()
+        .ok()?
+        .proxy
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+}
+
 /// 原子写启动器配置。
 pub fn save_config(config: &LauncherConfig) -> Result<(), String> {
     let file = paths::managed_root()?.join("config.json");
@@ -235,7 +240,10 @@ fn ready_default_exe() -> Option<PathBuf> {
 /// 自动下载一个已知良好版本、写为全局默认后返回其可执行文件路径。
 /// 下载经统一网关的 Node 发行包通道（激活镜像优先 + 官方兜底）。
 /// 阻塞调用——command/installer 侧放 spawn_blocking/worker 线程。
-pub fn ensure_default_node(event: &mut dyn FnMut(EnsureEvent)) -> Result<PathBuf, String> {
+pub fn ensure_default_node(
+    event: &mut dyn FnMut(EnsureEvent),
+    control: Option<&crate::task_queue::TaskControl>,
+) -> Result<PathBuf, String> {
     // 快路径：无需加锁即可确认已就绪。
     if let Some(exe) = ready_default_exe() {
         return Ok(exe);
@@ -261,7 +269,8 @@ pub fn ensure_default_node(event: &mut dyn FnMut(EnsureEvent)) -> Result<PathBuf
     });
     // FR-18 修订：发行包通道恒为 npmmirror 优先 + 官方兜底，与设置无关。
     let dist_bases = crate::gateway::node_dist_bases();
-    let dir = download_and_install(candidate, &dist_bases, &mut |received, total| {
+    let part = crate::task_queue::part_path(&format!("auto-node-{candidate}"));
+    let dir = download_and_install(candidate, &dist_bases, control, &part, &mut |received, total| {
         event(EnsureEvent::Bytes { received, total });
     })?;
     set_default_version(candidate)?;
@@ -308,7 +317,7 @@ fn expected_sha256(version_triple: &str, archive_name: &str, dist_bases: &[&str]
     let mut attempts: Vec<String> = Vec::new();
     for base in dist_bases {
         let url = format!("{base}/v{version_triple}/SHASUMS256.txt");
-        let agent = ureq::AgentBuilder::new()
+        let agent = crate::gateway::base_agent()
             .timeout_connect(std::time::Duration::from_secs(20))
             .timeout(std::time::Duration::from_secs(30))
             .build();
@@ -350,6 +359,8 @@ fn file_sha256(path: &Path) -> Result<String, String> {
 ///
 /// `dist_bases` 是经统一网关排序的发行包基址候选（激活源在前，其余兜底），
 /// 由调用方从 gateway::node_dist_bases 取得；本模块不感知镜像设置。
+/// `control` = 任务控制柄（暂停 / 继续 / 取消；None = 不可控，如测试）。
+/// `part_path` = 任务键控的断点续传临时文件（取消 / 换通道后自动 Range 续传）。
 /// `progress` 每 ≥256KB 或状态变化回调一次 (received, total)；total 为 0 表示未知长度。
 /// 成功返回安装目录；所有候选都不可达时返回最后一个错误。
 /// P2-03：下载前先取官方 SHASUMS256 校验和（取不到即拒绝），落盘 zip 必须
@@ -357,6 +368,8 @@ fn file_sha256(path: &Path) -> Result<String, String> {
 pub fn download_and_install(
     version: &str,
     dist_bases: &[&str],
+    control: Option<&crate::task_queue::TaskControl>,
+    part_path: &Path,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<PathBuf, String> {
     let (ma, mi, pa) =
@@ -368,13 +381,12 @@ pub fn download_and_install(
     let expected = expected_sha256(&format!("{ma}.{mi}.{pa}"), &archive_name, dist_bases)?;
 
     let mut last_err = String::from("未尝试任何通道");
-    DOWNLOAD_CANCEL.store(false, Ordering::Relaxed);
     for base in dist_bases {
-        if download_cancelled() {
-            return Err("下载已取消".into());
+        if let Some(control) = control {
+            control.checkpoint()?;
         }
         let url = format!("{base}/v{ma}.{mi}.{pa}/{archive_name}");
-        match try_download(&url, &archive_name, progress) {
+        match try_download(&url, part_path, control, progress) {
             Ok(zip_path) => {
                 let actual = file_sha256(&zip_path).unwrap_or_default();
                 if actual != expected {
@@ -402,50 +414,114 @@ pub fn download_and_install(
     Err(last_err)
 }
 
-/// 单镜像下载到临时文件；成功返回 zip 本地路径。crate 内复用（Node 便携包、
-/// DSH 源码归档共用同一套停滞看门狗与取消标志）。
+/// 下载到任务键控的临时文件；成功返回本地路径。crate 内复用（Node 便携包、
+/// DSH 源码归档、技能包共用同一套停滞看门狗、检查点与断点续传）。
+///
+/// 断点续传（FR-09 W1）：`part_path` 已有 N 字节时先带 `Range: bytes=N-` 重连，
+/// 206 → 追加续传（received 从 N 起算，total 取 Content-Range 绝对总长）；
+/// 服务端不支持（200 / 请求失败）→ 丢弃断点整段重来。断点在取消后**保留**
+///（重试自动续传）、读取失败时保留（换通道后 Range 重连仍有效）、成功后由
+/// 调用方随解压清理。
 ///
 /// 超时策略（真机走查实证：官方直连会「连接成功但数据流停滞」）：
 /// - `timeout_connect` 20s：连接建立失败快速换通道；
 /// - `timeout_read` 60s：**停滞看门狗**——单次读 60s 无数据即报错，由上层
 ///   循环自动切换下一通道，「永远下载中」不可能再出现；
 /// - `timeout` 30min：整体兜底，持续有慢速数据也不允许无限占用。
+///   暂停期间不发起读取、不触发读超时；暂停过久被服务端掐断连接时，恢复
+///   后的下一次读报错，上层换通道重连，Range 断点续传兜底。
 pub(crate) fn try_download(
     url: &str,
-    archive_name: &str,
+    part_path: &Path,
+    control: Option<&crate::task_queue::TaskControl>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<PathBuf, String> {
-    let agent = ureq::AgentBuilder::new()
+    let agent = crate::gateway::base_agent()
         .timeout_connect(std::time::Duration::from_secs(20))
         .timeout_read(std::time::Duration::from_secs(60))
         .timeout(std::time::Duration::from_secs(30 * 60))
         .build();
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|e| format!("下载 {url} 失败：{e}"))?;
-    let total = response
-        .header("Content-Length")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
+    // 检查点包装：取消错误统一带上已接收字节数（前端展示与重试口径一致）。
+    let checkpoint = |received: u64| -> Result<(), String> {
+        match control {
+            Some(c) => c.checkpoint().map_err(|e| {
+                if e.starts_with(crate::task_queue::CANCELLED_PREFIX) {
+                    crate::task_queue::cancelled_error(Some(received))
+                } else {
+                    e
+                }
+            }),
+            None => Ok(()),
+        }
+    };
 
-    let tmp_dir = std::env::temp_dir();
-    let zip_path = tmp_dir.join(archive_name);
-    let mut file = std::fs::File::create(&zip_path)
-        .map_err(|e| format!("创建临时文件 {} 失败：{e}", zip_path.display()))?;
+    let mut received: u64 = 0;
+    let (mut file, total, response) = loop {
+        checkpoint(received)?;
+        let resumed_bytes = if part_path.exists() {
+            part_path.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        let mut request = agent.get(url);
+        if resumed_bytes > 0 {
+            request = request.set("Range", &format!("bytes={resumed_bytes}-"));
+        }
+        let response = match request.call() {
+            Ok(response) => response,
+            Err(e) => {
+                if resumed_bytes > 0 {
+                    // 断点请求失败（416 / 代理不支持 Range / 服务端异常）：
+                    // 丢断点从零再来；再失败即返回错误（循环至多两轮）。
+                    let _ = std::fs::remove_file(part_path);
+                    continue;
+                }
+                return Err(format!("下载 {url} 失败：{e}"));
+            }
+        };
+        let status = response.status();
+        let append = resumed_bytes > 0 && status == 206;
+        if resumed_bytes > 0 && status != 206 {
+            // 服务器无视 Range 返回整段 200：丢断点整段重来。
+            let _ = std::fs::remove_file(part_path);
+        }
+        let start = if append { resumed_bytes } else { 0 };
+        let total = if status == 206 {
+            // Content-Range: bytes N-T/L——取绝对总长；缺失时退回 N + 剩余长度。
+            response
+                .header("Content-Range")
+                .and_then(|v| v.rsplit('/').next().and_then(|t| t.parse::<u64>().ok()))
+                .filter(|t| *t > 0)
+                .unwrap_or_else(|| {
+                    start
+                        + response
+                            .header("Content-Length")
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(0)
+                })
+        } else {
+            response
+                .header("Content-Length")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        let opened = if append {
+            std::fs::OpenOptions::new().append(true).open(part_path)
+        } else {
+            std::fs::File::create(part_path)
+        }
+        .map_err(|e| format!("打开临时文件 {} 失败：{e}", part_path.display()))?;
+        received = start;
+        break (opened, total, response);
+    };
 
     let mut reader = response.into_reader();
-    let mut received: u64 = 0;
-    let mut next_report: u64 = 256 * 1024;
+    let mut next_report: u64 = received + 256 * 1024;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        if download_cancelled() {
-            return Err(format!(
-                "下载已取消（已接收 {}）",
-                fmt_size(received)
-            ));
-        }
+        checkpoint(received)?;
         let n = reader.read(&mut buf).map_err(|e| {
+            // 断点保留：上层换通道重连后 Range 续传（文案保留既有指引）。
             format!(
                 "连接停滞或读取超时，已中止（已接收 {}）：{e} —— 可切换镜像源后重试",
                 fmt_size(received)
@@ -465,13 +541,13 @@ pub(crate) fn try_download(
     file.sync_all().ok();
     drop(file);
     progress(received, total);
-    // 长度为已知且不匹配视为损坏，避免解压半包。
+    // 长度为已知且不匹配视为损坏，避免解压半包（断点保留供续传补齐）。
     if total != 0 && received != total {
         return Err(format!(
             "下载不完整：预期 {total} 字节，实际 {received} 字节"
         ));
     }
-    Ok(zip_path)
+    Ok(part_path.to_path_buf())
 }
 
 /// 解压 zip 到 nodes/<version>/，剥掉压缩包首层目录（node-vX-win-x64/）。
@@ -712,15 +788,8 @@ zzzz-not-a-hash  node-v22.20.0-win-x86.zip
         assert!(!raw.contains("meets_range"), "禁止泄漏 snake_case 键：{raw}");
     }
 
-    /// 取消标志：置位后 try 循环应中止（不经网络验证，只验标志语义与重置）。
-    #[test]
-    fn cancel_flag_sets_and_resets() {
-        cancel_download();
-        assert!(download_cancelled());
-        // download_and_install 入口统一重置；直接模拟一次入口行为。
-        DOWNLOAD_CANCEL.store(false, Ordering::Relaxed);
-        assert!(!download_cancelled());
-    }
+    /// 取消标志语义已随 FR-09 W1 迁移至 task_queue::TaskControl
+    ///（见 task_queue 测试）；此处不再保留全局标志用例。
 
     /// 验收「一键下载成功 + 进度反馈 + ≥2 版本共存 + 全局默认生效」的真实下载验证。
     /// 慢速（两版 zip 共 ~60MB）+ 需网络，默认 `#[ignore]`，显式 `cargo test -- --ignored`。
@@ -731,13 +800,16 @@ zzzz-not-a-hash  node-v22.20.0-win-x86.zip
         let bases = crate::gateway::node_dist_bases();
         let mut progress_events: usize = 0;
         for version in ["22.20.0", "24.12.0"] {
-            let dir = download_and_install(version, &bases, &mut |received, total| {
+            let part = crate::task_queue::part_path(&format!("test-node-{version}"));
+            let _ = std::fs::remove_file(&part);
+            let dir = download_and_install(version, &bases, None, &part, &mut |received, total| {
                 progress_events += 1;
                 println!("[{version}] 进度回调 #{progress_events}: {received}/{total} 字节");
                 assert!(total == 0 || received <= total, "进度越界");
             })
             .unwrap_or_else(|e| panic!("下载 {version} 失败：{e}"));
             assert!(dir.join("node.exe").is_file(), "{version} 安装目录缺 node.exe");
+            let _ = std::fs::remove_file(&part);
         }
         assert!(progress_events > 0, "全程未收到任何进度回调");
 

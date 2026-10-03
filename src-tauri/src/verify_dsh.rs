@@ -201,14 +201,14 @@ fn phase2_acceptance_parallel_install_dual_ports_stop_and_real_conversation() {
                 if let crate::dsh_install::InstallStage::AutoNode { detail, .. } = stage {
                     notes_a.lock().unwrap_or_else(|p| p.into_inner()).push(detail);
                 }
-            })
+            }, None)
         });
         let handle_b = std::thread::spawn(move || {
             crate::dsh_install::install(&id_b, &v_b, &mut |stage| {
                 if let crate::dsh_install::InstallStage::AutoNode { detail, .. } = stage {
                     notes_b.lock().unwrap_or_else(|p| p.into_inner()).push(detail);
                 }
-            })
+            }, None)
         });
         (handle_a.join().expect("A 线程崩溃"), handle_b.join().expect("B 线程崩溃"))
     };

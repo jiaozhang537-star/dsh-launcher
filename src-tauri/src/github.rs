@@ -57,7 +57,7 @@ pub fn api_get_json(path: &str, query: &str) -> Result<FetchOutcome, String> {
     let url = gateway::resolve(&raw, &settings)?;
 
     let cached = market_cache::load()?.etags.get(&url).cloned();
-    let agent = ureq::AgentBuilder::new()
+    let agent = crate::gateway::base_agent()
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
         .build();

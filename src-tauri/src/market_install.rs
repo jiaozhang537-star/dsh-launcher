@@ -101,11 +101,22 @@ fn plugin_command(
         .env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
         .env("npm_config_registry", registry_base)
         .env("npm_config_update_notifier", "false");
+    // FR-11 代理：npm/官方链子进程经 npm_config_* 感知启动器代理设置。
+    if let Some(proxy) = crate::node_runtime::launcher_proxy() {
+        cmd.env("npm_config_proxy", &proxy)
+            .env("npm_config_https_proxy", &proxy);
+    }
     cmd
 }
 
 /// 运行一次官方链命令并 drain 双输出流（静默看门狗 600s 纯兜底）。
-fn run_plugin_command(mut cmd: Command, action: &str, progress: &mut dyn FnMut(String)) -> Result<(), String> {
+/// `control` = 取消检查点：500ms tick，命中即杀进程树并返回取消错误。
+fn run_plugin_command(
+    mut cmd: Command,
+    action: &str,
+    progress: &mut dyn FnMut(String),
+    control: Option<&crate::task_queue::TaskControl>,
+) -> Result<(), String> {
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .creation_flags_cv();
@@ -134,7 +145,18 @@ fn run_plugin_command(mut cmd: Command, action: &str, progress: &mut dyn FnMut(S
     let mut tail = dsh_install::OutputTail::new(30);
     let mut last_output = std::time::Instant::now();
     loop {
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        // 取消检查点：500ms tick 保证取消快速生效（kill 子进程树就地收尾）。
+        if let Some(control) = control {
+            if let Err(e) = control.checkpoint() {
+                let _ = child.kill();
+                for handle in readers {
+                    let _ = handle.join();
+                }
+                let _ = child.wait();
+                return Err(e);
+            }
+        }
+        match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(line) => {
                 last_output = std::time::Instant::now();
                 tail.push(line.clone());
@@ -233,10 +255,12 @@ pub struct PluginInstallOutcome {
 /// 把一个插件装进实例 profile（官方 `dsh plugin add` 链）。spec 支持 npm
 /// `name@ver` / `github:owner/repo` / `file:`/`link:` 本地路径（pnpm 语义）。
 /// 阻塞调用——command 侧放 spawn_blocking。重复安装幂等（覆盖重装）。
+/// `control` = 取消检查点（子进程链不支持暂停/继续；取消 ≤0.5s 生效杀进程）。
 pub fn plugin_add(
     instance_id: &str,
     spec: &str,
     progress: &mut dyn FnMut(String),
+    control: Option<&crate::task_queue::TaskControl>,
 ) -> Result<PluginInstallOutcome, String> {
     let trimmed = spec.trim();
     if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
@@ -264,7 +288,7 @@ pub fn plugin_add(
     let bin_js = dsh_install::installed_bin_js(instance_id)?
         .ok_or_else(|| "该实例尚未安装 DSH 本体——请先到下载页安装，再装插件".to_string())?;
     progress("校验 Node 运行时与 pnpm 供给…".into());
-    let node_exe = dsh_install::resolve_install_node(&instance, &mut |_stage| {})?;
+    let node_exe = dsh_install::resolve_install_node(&instance, &mut |_stage| {}, control)?;
     let shim = ensure_pnpm_shim(&node_exe)?;
 
     let profile = profile_dir(instance_id, &instance.profile)?;
@@ -273,6 +297,9 @@ pub fn plugin_add(
 
     let mut attempts = Vec::new();
     for registry_base in gateway::npm_registry_bases() {
+        if let Some(control) = control {
+            control.checkpoint()?;
+        }
         progress(format!("正在安装 {trimmed}（通道 {registry_base}）…"));
         let cmd = plugin_command(
             &node_exe,
@@ -283,7 +310,7 @@ pub fn plugin_add(
             &["add", trimmed],
             registry_base,
         );
-        match run_plugin_command(cmd, &format!("dsh plugin add {trimmed}"), progress) {
+        match run_plugin_command(cmd, &format!("dsh plugin add {trimmed}"), progress, control) {
             Ok(()) => break,
             Err(e) => attempts.push(format!("[通道 {registry_base}] {e}")),
         }
@@ -404,7 +431,7 @@ pub fn plugin_remove(instance_id: &str, package: &str, progress: &mut dyn FnMut(
     let instance = instances::get_instance(instance_id)?;
     let bin_js = dsh_install::installed_bin_js(instance_id)?
         .ok_or_else(|| "该实例尚未安装 DSH 本体".to_string())?;
-    let node_exe = dsh_install::resolve_install_node(&instance, &mut |_stage| {})?;
+    let node_exe = dsh_install::resolve_install_node(&instance, &mut |_stage| {}, None)?;
     let shim = ensure_pnpm_shim(&node_exe)?;
     let profile = profile_dir(instance_id, &instance.profile)?;
     let dsh_home = instances::instance_dir(instance_id)?;
@@ -427,7 +454,7 @@ pub fn plugin_remove(instance_id: &str, package: &str, progress: &mut dyn FnMut(
             &["remove", package],
             registry_base,
         );
-        match run_plugin_command(cmd, &format!("dsh plugin remove {package}"), progress) {
+        match run_plugin_command(cmd, &format!("dsh plugin remove {package}"), progress, None) {
             Ok(()) => break,
             Err(e) => attempts.push(format!("[通道 {registry_base}] {e}")),
         }
@@ -467,15 +494,15 @@ mod tests {
     #[test]
     fn blank_or_spaced_spec_rejected() {
         let mut sink = |_d: String| {};
-        assert!(plugin_add("i-x", "", &mut sink).is_err());
-        assert!(plugin_add("i-x", "a b", &mut sink).is_err());
+        assert!(plugin_add("i-x", "", &mut sink, None).is_err());
+        assert!(plugin_add("i-x", "a b", &mut sink, None).is_err());
     }
 
     #[test]
     fn missing_instance_fails_loud() {
         let (_lock, tmp) = crate::instances::tests::sandbox("minstall-noinst");
         let mut sink = |_d: String| {};
-        assert!(plugin_add("i-missing", "dsh-cost-meter", &mut sink).is_err());
+        assert!(plugin_add("i-missing", "dsh-cost-meter", &mut sink, None).is_err());
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -508,7 +535,7 @@ mod tests {
         let mut sink = |detail: String| println!("  [进度] {detail}");
 
         let _ = plugin_remove(&target.id, "dsh-cost-meter", &mut sink); // 干净起点（幂等）
-        let outcome = plugin_add(&target.id, "dsh-cost-meter", &mut sink).expect("官方链安装失败");
+        let outcome = plugin_add(&target.id, "dsh-cost-meter", &mut sink, None).expect("官方链安装失败");
         assert_eq!(outcome.package_name, "dsh-cost-meter");
         assert!(outcome.bundle_activated, "dsh-cost-meter 应进入 bundles 层");
         assert!(!outcome.version.is_empty(), "应能解析已装版本");
@@ -562,7 +589,7 @@ mod tests {
             .expect("需要一个非最新版本");
         println!("选择非最新版本：dsh-find-plugin@{}", pick.version);
 
-        let outcome = plugin_add(&target.id, &format!("dsh-find-plugin@{}", pick.version), &mut sink)
+        let outcome = plugin_add(&target.id, &format!("dsh-find-plugin@{}", pick.version), &mut sink, None)
             .expect("安装失败");
         assert!(outcome.bundle_activated, "应进入 bundles 层");
         assert_eq!(outcome.version, pick.version, "装后版本应与所选一致");
@@ -606,7 +633,7 @@ mod tests {
         println!("e2e 目标实例：{}", target.id);
         let mut sink = |detail: String| println!("  [进度] {detail}");
 
-        let result = plugin_add(&target.id, "github:NanmiCoder/dsh-agent-teams", &mut sink);
+        let result = plugin_add(&target.id, "github:NanmiCoder/dsh-agent-teams", &mut sink, None);
         match result {
             Ok(outcome) => {
                 println!("git 直装成功：{} @ {}", outcome.package_name, outcome.version);

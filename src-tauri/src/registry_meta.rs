@@ -142,7 +142,7 @@ pub fn fetch_packument(package: &str) -> Result<Value, String> {
         return Err(format!("非法 npm 包名：{package:?}"));
     }
     mirror_config::load()?;
-    let agent = ureq::AgentBuilder::new()
+    let agent = crate::gateway::base_agent()
         .timeout_connect(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(60))
         .build();

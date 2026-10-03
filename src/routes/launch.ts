@@ -4,7 +4,7 @@ import { icon } from "../lib/icons";
 import { enterMsg } from "../lib/anim";
 import { showHint } from "../lib/hint";
 import { webEntryUrl } from "../lib/launch-decision";
-import { sortInstancesByRecency } from "../lib/instanceOrder";
+import { sortInstancesForLaunch } from "../lib/instanceOrder";
 import { settledStageText, stepLevelOf, type StepLevel } from "../lib/launchSteps";
 import { getSelectedInstance, setSelectedInstance } from "../lib/selected-instance";
 import {
@@ -1241,7 +1241,8 @@ export const launchPage: PageDefinition = {
           initError = String(err);
         }
         if (!selectedId) {
-          selectedId = sortInstancesByRecency(instances)[0]?.id ?? null;
+          // FR-10：收藏（= 置顶）优先于最近使用。
+          selectedId = sortInstancesForLaunch(instances)[0]?.id ?? null;
         }
         // FR-20/21：注入完整厂商目录（内置 11 类 + 自定义），胶囊随启用厂商扩容。
         try {

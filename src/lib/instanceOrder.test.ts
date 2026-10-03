@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sortInstancesByRecency, uniqueInstanceName } from "./instanceOrder";
+import { sortInstancesByRecency, sortInstancesForLaunch, uniqueInstanceName } from "./instanceOrder";
 import type { Instance } from "../services/instances";
 
 function inst(partial: Partial<Instance> & { id: string }): Instance {
@@ -12,6 +12,9 @@ function inst(partial: Partial<Instance> & { id: string }): Instance {
     lastLaunchedAt: null,
     createdAt: "2026-01-01T00:00:00Z",
     dir: null,
+    launchArgs: null,
+    workDir: null,
+    isolation: true,
     ...partial,
   };
 }
@@ -64,5 +67,23 @@ describe("uniqueInstanceName", () => {
   it("中间空洞会被填上（与后端 unique_name 同规则）", () => {
     const taken = ["dsh-0.1.1", "dsh-0.1.1-2", "dsh-0.1.1-4"];
     expect(uniqueInstanceName("dsh-0.1.1", taken)).toBe("dsh-0.1.1-3");
+  });
+});
+
+describe("sortInstancesForLaunch（FR-10：收藏 = 置顶，合一裁决）", () => {
+  const a = inst({ id: "a", lastLaunchedAt: "2026-08-28T09:00:00Z" });
+  const b = inst({ id: "b", lastLaunchedAt: "2026-08-01T10:00:00Z" });
+  const c = inst({ id: "c", lastLaunchedAt: "2026-08-20T10:00:00Z" });
+
+  it("收藏的实例按收藏先后置顶，其余按最近使用", () => {
+    expect(sortInstancesForLaunch([a, b, c], ["b", "c"]).map((i) => i.id)).toEqual(["b", "c", "a"]);
+  });
+
+  it("无收藏时退化为最近使用排序", () => {
+    expect(sortInstancesForLaunch([a, b, c], []).map((i) => i.id)).toEqual(["a", "c", "b"]);
+  });
+
+  it("收藏列表里的脏 id 不影响其余排序", () => {
+    expect(sortInstancesForLaunch([a, b, c], ["ghost", "c"]).map((i) => i.id)).toEqual(["c", "a", "b"]);
   });
 });

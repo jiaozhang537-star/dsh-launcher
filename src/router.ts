@@ -28,8 +28,12 @@ let container: HTMLElement | null = null;
 /** 当前挂载的页面定义：切页时对其调用 unmount。 */
 let mountedDef: PageDefinition | null = null;
 
-/** 上一页 id：顶栏 ← 返回用；同页重渲染不更新。 */
-let lastPageId: string | null = null;
+/** 页面历史栈：末项 = 当前页。维护走 renderCurrent 的目标 id 差分——
+ *  id==栈顶：同 hash 重复派发（happy-dom 一次赋值可能派发多次），不动栈；
+ *  id==栈顶的上一项：← 返回，弹栈；其余：前进导航/首挂/直达深链，压栈。
+ *  P5 曾以单槽 lastPageId 记「上一页」，返回后被反向回写致两页乒乓
+ *  （版本设置↔版本选择，2026-10-03 需求方实机报障），换真栈逐级回退。 */
+const pageHistory: string[] = [];
 
 /** 导航代数：退场动画期间的快速连切以代数守卫，旧换内容定时器作废。 */
 let navSeq = 0;
@@ -55,6 +59,15 @@ function renderCurrent(): void {
   if (!def) {
     throw new Error(`未注册的页面：${id}`);
   }
+  // 历史栈差分（幂等）：同页不动、来路页弹栈、其余压栈——见 pageHistory 注释
+  const top = pageHistory[pageHistory.length - 1];
+  if (top !== id) {
+    if (pageHistory.length >= 2 && pageHistory[pageHistory.length - 2] === id) {
+      pageHistory.pop();
+    } else {
+      pageHistory.push(id);
+    }
+  }
   // PCL PageChangeAnim 原式：旧页退场动画（70~110ms）跑着，110ms 后换内容，
   // enterPage 内再含 30ms 触发延迟。快速连切以导航代数守卫，旧换内容定时器作废。
   if (!container) {
@@ -73,14 +86,12 @@ function renderCurrent(): void {
         console.error(`页面 ${mountedDef.id} 卸载清理失败：`, err);
       }
     }
-    if (mountedDef && mountedDef.id !== id) {
-      lastPageId = mountedDef.id;
-    }
+    const fromId = mountedDef?.id ?? null; // 来源页 = 实际可见的上一页
     mountedDef = def;
     host.replaceChildren();
     host.append(def.render());
     // 来源页无左栏（主页）→ 目标页左栏滑出（PCL PanMainLeft_Resize 原式近似）
-    enterPage(host, { fromNoLeftColumn: lastPageId === "launch" });
+    enterPage(host, { fromNoLeftColumn: fromId === "launch" });
     for (const notify of listeners) {
       notify(id);
     }
@@ -114,9 +125,14 @@ export function navigate(pageId: string): void {
   location.hash = `#/${pageId}`;
 }
 
-/** 返回上一页（顶栏 ←）；无上一页（如刷新直达二级页）时回主页。 */
+/** 返回上一页（顶栏 ←）：按来路逐级回退；栈里只有当前页（如刷新直达
+ *  二级页）时回主页。 */
 export function goBack(): void {
-  navigate(lastPageId ?? DEFAULT_PAGE_ID);
+  const target =
+    pageHistory.length >= 2
+      ? pageHistory[pageHistory.length - 2]
+      : DEFAULT_PAGE_ID;
+  navigate(target);
 }
 
 /** 以注册顺序返回全部页面定义（顶栏导航用，含二级页——顶栏自行过滤）。 */

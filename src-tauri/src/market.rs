@@ -466,7 +466,7 @@ pub fn display_tags(keywords: &[String]) -> Vec<String> {
 /// 回落官方——优先≠独占的语义对元数据同样成立。
 fn npm_search_page(from: u32, keyword: &str) -> Result<serde_json::Value, String> {
     mirror_config::load()?;
-    let agent = ureq::AgentBuilder::new()
+    let agent = crate::gateway::base_agent()
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
         .build();
@@ -546,7 +546,7 @@ fn npm_monthly_bulk(names: &[String]) -> HashMap<String, u64> {
             Some(s) => gateway::resolve(&raw, s).unwrap_or(raw),
             None => raw,
         };
-        let Ok(response) = ureq::AgentBuilder::new()
+        let Ok(response) = crate::gateway::base_agent()
             .timeout_connect(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .build()
@@ -722,7 +722,7 @@ fn fetch_feed_dshhub() -> Result<Vec<MarketCard>, String> {
     let raw = format!("{DSHHUB_OFFICIAL}/api/v1/plugins?scope=all&limit=200");
     let settings = mirror_config::load()?;
     let url = gateway::resolve(&raw, &settings)?;
-    let agent = ureq::AgentBuilder::new()
+    let agent = crate::gateway::base_agent()
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
         .build();
@@ -1153,7 +1153,7 @@ fn npm_weekly_downloads(package: &str) -> HashMap<String, u64> {
     let Ok(url) = gateway::resolve(&raw, &settings) else {
         return out;
     };
-    let agent = ureq::AgentBuilder::new()
+    let agent = crate::gateway::base_agent()
         .timeout_connect(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build();

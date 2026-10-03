@@ -1,14 +1,18 @@
 import { el } from "../lib/dom";
 import { icon } from "../lib/icons";
 import { enterMsg } from "../lib/anim";
+import { showHint } from "../lib/hint";
 import { sortInstancesByRecency } from "../lib/instanceOrder";
 import { dropFavorite, isFavorite, loadFavorites, toggleFavorite } from "../lib/instanceFavorites";
 import { getSelectedInstance, setSelectedInstance } from "../lib/selected-instance";
 import type { PageDefinition } from "../router";
 import { navigate } from "../router";
+import { fmtBytes } from "./downloads";
 import {
   deleteInstance,
+  instanceSize,
   listInstances,
+  openInstanceSubdir,
   pickFolder,
   registerExternalInstance,
   type Instance,
@@ -149,6 +153,21 @@ export const instanceSelectPage: PageDefinition = {
               : "插件、Skill 将会一并删除。",
           ]),
         );
+        // FR-10 数据量级说明：托管实例补「约多大」——尽力而为，拉不到就不显示；
+        // 异步回填带目标校验，用户换目标/关卡后不落旧文案。
+        if (!confirmTarget.dir) {
+          const targetId = confirmTarget.id;
+          void instanceSize(targetId)
+            .then(({ bytes, files }) => {
+              if (confirmTarget?.id !== targetId) return;
+              confirmBody.append(
+                el("p", { class: "confirm-card__line" }, [
+                  `将删除约 ${fmtBytes(bytes)}（${files} 个文件），删除后不可恢复。`,
+                ]),
+              );
+            })
+            .catch(() => {});
+        }
       }
       // 弹窗入场（spec §5 MyMsg：Y40→0 300ms OutBack）——只在由隐转现那一次播。
       if (firstShow) enterMsg(confirmOverlay.querySelector<HTMLElement>(".confirm-card")!);
@@ -186,6 +205,18 @@ export const instanceSelectPage: PageDefinition = {
         renderRight();
       });
 
+      const openBtn = el("button", {
+        type: "button",
+        class: "ver-act",
+        title: "打开实例目录",
+      }, [icon("folder", 15)]);
+      openBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void openInstanceSubdir(inst.id, "root").catch((err) => {
+          showHint(`打开目录失败：${String(err).slice(0, 120)}`);
+        });
+      });
+
       const delBtn = el("button", {
         type: "button",
         class: "ver-act ver-act--del",
@@ -218,7 +249,7 @@ export const instanceSelectPage: PageDefinition = {
         }
       });
 
-      row.append(versionIcon(), text, el("span", { class: "ver-row__acts" }, [favBtn, delBtn, setBtn]));
+      row.append(versionIcon(), text, el("span", { class: "ver-row__acts" }, [favBtn, openBtn, delBtn, setBtn]));
       return row;
     }
 

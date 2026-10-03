@@ -77,7 +77,7 @@ pub fn fetch_models_style(base_url: &str, key: &str, style: ApiStyle) -> Result<
         return Err("提供方地址为空".into());
     }
     let key = key.trim();
-    let agent = ureq::AgentBuilder::new()
+    let agent = crate::gateway::base_agent()
         .timeout_connect(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build();

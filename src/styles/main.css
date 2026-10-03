@@ -146,8 +146,10 @@ button {
   color: var(--cb3);
 }
 
-/* 窗控（FormMain：Theme=White MyRadioButton，28×28，Close 右12 / Min 右44，
-   即容器右距 12 + 键间 4；悬停=同 White 态 CB7 底蓝字，无红键——S7 实机复核点） */
+/* 窗控（FormMain：Theme=White MyIconButton，28×28，Close 右12 / Min 右44，
+   即容器右距 12 + 键间 4。hover 遗留①已按源码复核（MyIconButton.xaml.vb:116-117，
+   2026-09-30）：White 态 hover = 20% 白色叠层（New MyColor(50,255,255,255)），
+   图标恒白（ColorBrush8），无红键、非 CB7 蓝字。 */
 .topbar__controls {
   display: flex;
   align-items: center;
@@ -177,8 +179,8 @@ button {
 }
 
 .win-btn:hover {
-  background: var(--cb7);
-  color: var(--cb3);
+  background: var(--white-20);
+  color: inherit;
 }
 
 /* ===== 页面通用 ===== */
@@ -2921,7 +2923,7 @@ button {
   padding: 1px 10px;
   border: 0;
   border-radius: 999px;
-  background: var(--tab-active-bg); /* ≈ 主色 8% 叠层（与市场 tab 同源，S4 复核） */
+  background: var(--tint-primary-8); /* 主色 8% 叠层（主题切换联动，原 --tab-active-bg 更名） */
   color: var(--cb2);
   font-family: inherit;
   font-size: var(--fs-body);
@@ -3396,6 +3398,8 @@ button {
 .tasks__left {
   width: 220px;
   flex: none;
+  display: flex;
+  flex-direction: column;
   background: var(--white);
   padding: 20px 14px;
   overflow-y: auto;
@@ -3482,6 +3486,15 @@ button {
   color: var(--red-light);
 }
 
+/* 暂停态图标（灰）与取消态叉（灰）——均为 PCL 语言内的降饱和呈现。 */
+.tasks__state--paused {
+  color: var(--gray2);
+}
+
+.tasks__state--cancelled {
+  color: var(--gray3);
+}
+
 .tasks__row-text {
   flex: 1;
   min-width: 0;
@@ -3494,6 +3507,58 @@ button {
 
 .tasks__row-text--failed {
   color: var(--red-dark);
+}
+
+.tasks__clear {
+  margin-top: auto;
+  align-self: flex-end;
+}
+
+/* .btn 是显式 inline-flex，会打败 UA 的 [hidden]（批次③坑）——配套补齐。 */
+.tasks__clear[hidden] {
+  display: none;
+}
+
+/* 主题色卡（FR-11）：方形色块 = PCL 个性化语言（圆角 3、选中主色描边）。 */
+.theme-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.theme-swatch {
+  width: 32px;
+  height: 32px;
+  border-radius: 3px;
+  border: 1px solid var(--cb1);
+  padding: 0;
+  cursor: pointer;
+}
+
+.theme-swatch--on {
+  outline: 2px solid var(--cb3);
+  outline-offset: 1px;
+}
+
+.theme-input {
+  max-width: 64px;
+  padding: 2px;
+  height: 28px;
+}
+
+/* 使用帮助步骤行（PROJECT §7：帮助内容仅存在于「更多」页）——
+   PCL 朴素文案风：步骤标题主色、说明走既有 settings-path 灰阶。 */
+.help-step {
+  align-items: baseline;
+}
+
+.help-step__title {
+  flex: none;
+  width: 96px;
+  font-size: var(--fs-body);
+  color: var(--cb3);
+  font-weight: 600;
 }
 
 .tasks__pct {
@@ -3589,8 +3654,10 @@ button {
 /* ===== 滚动条槽位恒定（H5：对齐 PCL 悬浮式滚动条的「不占布局」观感）=====
    WebView 原生滚动条占布局空间：内容高度跨过视口阈值时 8px 滚动条出现/消失，
    右栏内容随之横移一下（设置页进入/切分类时最明显）。gutter stable 恒定预留
-   槽位后不再横移。 */
-.app-main,
+   槽位后不再横移。
+   .app-main 不在此列：所有页面根都是 height:100% + 自带滚动容器，它本身
+   永不滚动，预留槽位是死重——且槽里露出的是它自己的渐变底色，在右栏为
+   纯色的页面上（启动/下载页 CB8）就是最右缘一条异色竖带（走查 2026-10-03）。 */
 .sub-right,
 .dl-right,
 .mk-detail,

@@ -33,9 +33,9 @@ export async function downloadSourceArchive(
   }
 }
 
-/** 请求中止进行中的源码归档下载（与 Node 下载共用取消标志）。 */
-export function cancelSourceDownload(): Promise<void> {
-  return invoke<void>("source_download_cancel");
+/** 请求取消进行中的源码归档下载（key = 任务 store 的 key；断点保留供重试续传）。 */
+export function cancelSourceDownload(key: string): Promise<void> {
+  return invoke<void>("task_cancel", { key });
 }
 
 /** 在系统文件管理器中打开已下载的源码目录（instanceId 语义同上）。 */

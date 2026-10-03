@@ -43,9 +43,9 @@ export async function downloadNode(
   }
 }
 
-/** 请求中止进行中的 Node 下载（后端停滞看门狗至多 60s 后生效）。 */
-export function cancelDownload(): Promise<void> {
-  return invoke<void>("node_download_cancel");
+/** 请求取消进行中的 Node 下载（key = `node-<version>`；断点保留供重试续传）。 */
+export function cancelDownload(key: string): Promise<void> {
+  return invoke<void>("task_cancel", { key });
 }
 
 /** 读全局默认托管 Node 版本。 */

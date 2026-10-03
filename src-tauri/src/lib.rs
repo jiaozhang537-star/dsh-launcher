@@ -24,6 +24,8 @@ mod registry_meta;
 mod skills;
 mod snapshot;
 mod source_archive;
+mod task_queue;
+mod self_update;
 #[cfg(test)]
 mod verify_dsh;
 
@@ -38,13 +40,25 @@ pub fn run() {
             instance_register_external,
             instance_open_subdir,
             instance_delete,
+            instance_size,
+            instance_set_advanced,
+            instance_set_isolation,
+            update_check,
+            update_download,
+            update_install,
             instance_get,
             instance_update,
             managed_root_info,
             node_system_info,
             node_managed_versions,
             node_download,
-            node_download_cancel,
+            task_pause,
+            task_resume,
+            task_cancel,
+            max_downloads_get,
+            max_downloads_set,
+            proxy_get,
+            proxy_set,
             node_default_get,
             node_default_set,
             inject_get_override,
@@ -59,7 +73,6 @@ pub fn run() {
             mirror_set,
             mirror_test,
             source_download,
-            source_download_cancel,
             source_open_dir,
             source_delete,
             source_status,
@@ -102,8 +115,97 @@ pub fn run() {
     modpack_import,
     modpack_stage_drop,
 ])
+        .setup(|app| {
+            // 禁止最大化守卫安装（P6 验收补丁，需求方裁决「禁止放大、保留拖边框改尺寸」）。
+            // 注意：不要在此做任何 set_size / DPI 换算——conf 850×500 + center:true 的
+            // 创建路径本来就正确（c4d0e57a 实测 1071×630 物理）；此前的
+            // current_monitor().scale_factor() 修正是用**监视器 DPI**（169%）覆盖了
+            // **内容渲染 DPI**（126%），反而把窗口放大到 1440×846——已撤。
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(hwnd) = window.hwnd() {
+                        window_guard::install(hwnd.0 as isize);
+                    }
+                    // 上游 wry/WebView2Feedback#2549：无装饰+透明窗口在非标准缩放下
+                    // WebView2 子窗边界可能小于父窗客户区（wry 的 SetBounds 是异步
+                    // SWP_ASYNCWINDOWPOS，创建期可能还没跑完一次完整布局）→ 右缘
+                    // 露出底色缝隙。此处 +1px/-1px 微调触发两次 WM_SIZE → wry 重设
+                    // 子窗边界铺满父窗客户区，消除缝隙。
+                    let size = window.inner_size()?;
+                    let _ = window.set_size(tauri::PhysicalSize::new(
+                        size.width + 1,
+                        size.height + 1,
+                    ));
+                    let _ = window.set_size(size);
+                }
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 最大化守卫（P6 验收补丁，需求方裁决「禁止放大、保留拖边框改尺寸」）。
+///
+/// 分层事实（2026-10-01 源码级复核，tao 0.35.3 / tauri 2.11.5）：
+/// - conf `maximizable: false` 只移除 WS_MAXIMIZEBOX——灰化系统菜单项、断 Win+Up，
+///   **拦不住**直接投递的 `WM_SYSCOMMAND(SC_MAXIMIZE)`（UIA/无障碍 WindowPattern 路径）；
+/// - 标题栏 `startDragging` 投递 `WM_NCLBUTTONDOWN(HTCAPTION)`，快速双击被系统合成
+///   `WM_NCLBUTTONDBLCLK(HTCAPTION)` → DefWindowProc 最大化（上游 tauri#11945）——
+///   phase-02 的「移除 drag-region」只禁了前端双击处理，没禁这条系统路径；
+/// - 此前试验过的「Resized 事件里 unmaximize」守卫已**废除**：SW_RESTORE 在 126%
+///   非标准缩放下把窗口还原到损坏几何（实测 1440×821、约 1000×600，低于 minWidth），
+///   并在交互式缩放的模态循环内触发 ShowWindow 中止拖拽（边缘放大失效的根源）。
+///
+/// 本模块改用 **comctl32 SetWindowSubclass**(Windows 官方的多子类堆叠机制,链序由
+/// 系统管理,与 tao/wry 的窗口过程链互不干扰):仅吃掉上述两条消息(返回 0),其余全部
+/// `DefSubclassProc` 透传——不触碰 WM_NCHITTEST / WM_GETMINMAXINFO / 模态缩放循环,
+/// 边缘双向缩放零影响;窗口**永不进入最大化态**,也就永不 SW_RESTORE,几何损坏源归零。
+/// (历史:GWLP_WNDPROC 替换式子类与 tao/wry 过程链相互踩踏,实机复现主窗口几何
+/// 损坏飞出屏幕外,已弃——见 phase-06 日志 2026-10-01 分离实验。)
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod window_guard {
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{HTCAPTION, WM_NCLBUTTONDBLCLK, WM_SYSCOMMAND};
+
+    /// 子类实例标识(同 hwnd 同 id 重复安装会失败;单窗口单子类,取 1)。
+    const SUBCLASS_ID: usize = 1;
+
+    /// SC_MAXIMIZE 低 4 位为系统内部位,标准判定法:掩掉后比较。
+    const SC_MAXIMIZE_MASK: usize = 0xF030;
+
+    /// 安装守卫:挂子类过程。必须在窗口创建后调用(run() 的 setup 内,单窗口一次)。
+    pub(super) fn install(hwnd: isize) {
+        unsafe {
+            SetWindowSubclass(HWND(hwnd as *mut _), Some(guard_subclass_proc), SUBCLASS_ID, 0)
+                .ok()
+                .expect("安装最大化守卫子类失败");
+        }
+    }
+
+    unsafe extern "system" fn guard_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        let blocked = match msg {
+            // UIA/无障碍/系统菜单/Win+Up 的最大化直投路径。
+            WM_SYSCOMMAND => (wparam.0 & 0xFFF0) == SC_MAXIMIZE_MASK,
+            // 标题栏双击(startDragging 的 HTCAPTION 非客户双击合成)。
+            WM_NCLBUTTONDBLCLK => wparam.0 as u32 == HTCAPTION,
+            _ => false,
+        };
+        if blocked {
+            return LRESULT(0);
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
 }
 
 /// 暴露托管根目录与就绪状态给前端（首次运行时触发目录初始化）。
@@ -132,6 +234,8 @@ fn node_managed_versions() -> Result<Vec<String>, String> {
 
 /// 下载并安装便携版 Node（阻塞至完成；进度经事件 `node-download-progress` 推送）。
 /// 发行包通道顺序由统一网关按镜像源设置决定。
+/// FR-09：任务键 `node-<version>`，支持暂停 / 继续 / 取消（task_* 命令）与
+/// Range 断点续传；受并发额度闸约束（排队等待期间同样可暂停 / 取消）。
 #[tauri::command]
 async fn node_download(
     app: tauri::AppHandle,
@@ -142,29 +246,59 @@ async fn node_download(
     if node_runtime::parse_node_version(&version).is_none() {
         return Err(format!("非法版本号：{version:?}"));
     }
+    let key = format!("node-{version}");
+    let control = task_queue::register(&key);
     let dist_bases = gateway::node_dist_bases();
     let handle = app.clone();
+    let part = task_queue::part_path(&key);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let emitter = handle.clone();
-        node_runtime::download_and_install(&version, &dist_bases, &mut |received, total| {
-            let _ = emitter.emit(
-                node_runtime::PROGRESS_EVENT,
-                serde_json::json!({ "received": received, "total": total }),
-            );
-        })
+        let outcome = (|| {
+            let _permit = task_queue::acquire(&control)?;
+            node_runtime::download_and_install(
+                &version,
+                &dist_bases,
+                Some(&control),
+                &part,
+                &mut |received, total| {
+                    let _ = emitter.emit(
+                        node_runtime::PROGRESS_EVENT,
+                        serde_json::json!({ "received": received, "total": total }),
+                    );
+                },
+            )
+        })();
+        task_queue::finish(&key);
+        outcome
     })
     .await
     .map_err(|e| format!("下载任务崩溃：{e:?}"))?;
-    match result {
-        Ok(dir) => Ok(dir.display().to_string()),
-        Err(e) => Err(e),
-    }
+    result.map(|dir| dir.display().to_string())
 }
 
-/// 请求中止进行中的 Node 下载（停滞看门狗至多 60s 后生效）。
+/// 任务控制（FR-09）：暂停 / 继续 / 取消，key = 前端任务 store 的任务键。
+/// 对「排队等待并发额度」的任务同样生效（等待循环过检查点）。
 #[tauri::command]
-fn node_download_cancel() -> Result<(), String> {
-    node_runtime::cancel_download();
+fn task_pause(key: String) -> Result<(), String> {
+    let control =
+        task_queue::lookup(&key).ok_or_else(|| format!("任务不存在或已结束：{key}"))?;
+    control.pause();
+    Ok(())
+}
+
+#[tauri::command]
+fn task_resume(key: String) -> Result<(), String> {
+    let control =
+        task_queue::lookup(&key).ok_or_else(|| format!("任务不存在或已结束：{key}"))?;
+    control.resume();
+    Ok(())
+}
+
+#[tauri::command]
+fn task_cancel(key: String) -> Result<(), String> {
+    let control =
+        task_queue::lookup(&key).ok_or_else(|| format!("任务不存在或已结束：{key}"))?;
+    control.cancel();
     Ok(())
 }
 
@@ -178,6 +312,39 @@ fn node_default_get() -> Result<Option<String>, String> {
 #[tauri::command]
 fn node_default_set(version: String) -> Result<(), String> {
     node_runtime::set_default_version(&version)
+}
+
+/// 下载并发上限（FR-09/FR-11；默认 3，收敛 1~10）。
+#[tauri::command]
+fn max_downloads_get() -> Result<u32, String> {
+    Ok(node_runtime::load_config()?.max_downloads.unwrap_or(3))
+}
+
+#[tauri::command]
+fn max_downloads_set(value: u32) -> Result<(), String> {
+    if !(1..=10).contains(&value) {
+        return Err(format!("并发数须在 1~10 之间：{value}"));
+    }
+    let mut config = node_runtime::load_config()?;
+    config.max_downloads = Some(value);
+    node_runtime::save_config(&config)
+}
+
+/// HTTP(S) 代理（FR-11；空串 = 直连。设置时经 ureq 校验地址合法性）。
+#[tauri::command]
+fn proxy_get() -> Result<String, String> {
+    Ok(node_runtime::load_config()?.proxy.unwrap_or_default())
+}
+
+#[tauri::command]
+fn proxy_set(proxy: String) -> Result<(), String> {
+    let trimmed = proxy.trim().to_string();
+    if !trimmed.is_empty() {
+        ureq::Proxy::new(&trimmed).map_err(|e| format!("代理地址无效：{e}"))?;
+    }
+    let mut config = node_runtime::load_config()?;
+    config.proxy = if trimmed.is_empty() { None } else { Some(trimmed) };
+    node_runtime::save_config(&config)
 }
 
 /// 枚举全部实例（camelCase 视图；持久化格式不受影响）。
@@ -230,6 +397,64 @@ fn instance_open_subdir(
 #[tauri::command]
 fn instance_delete(id: String) -> Result<(), String> {
     instances::delete_instance(&id)
+}
+
+/// 实例目录体量统计（FR-10 删除确认的「数据量级说明」；尽力而为参考值）。
+#[tauri::command]
+fn instance_size(id: String) -> Result<instances::DirStats, String> {
+    instances::dir_stats(&id)
+}
+
+/// FR-12：实例级高级设置（启动参数 / 工作目录覆盖；None / 空 = 清除覆盖）。
+#[tauri::command]
+fn instance_set_advanced(
+    id: String,
+    launch_args: Option<String>,
+    work_dir: Option<String>,
+) -> Result<(), String> {
+    instances::set_advanced(&id, launch_args, work_dir)
+}
+
+/// FR-17：切换实例隔离（插件目录 junction 迁移 + 配置单源切换）。返回人读报告。
+#[tauri::command]
+fn instance_set_isolation(id: String, isolation: bool) -> Result<String, String> {
+    instances::set_isolation(&id, isolation)
+}
+
+/// FR-13：检查启动器更新（GitHub Releases；更新源 = config.json 的 update_repo，
+/// 未配置时如实报告）。阻塞网络调用，spawn_blocking 执行。
+#[tauri::command]
+async fn update_check(current_version: String) -> Result<self_update::UpdateStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || self_update::check(&current_version))
+        .await
+        .map_err(|e| format!("检查更新任务崩溃：{e:?}"))?
+}
+
+/// FR-13：下载最新安装包（统一队列任务键 `update`，断点续传）。返回本地路径。
+#[tauri::command]
+async fn update_download(current_version: String) -> Result<String, String> {
+    let key = "update".to_string();
+    let control = task_queue::register(&key);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let outcome = (|| {
+            let _permit = task_queue::acquire(&control)?;
+            self_update::download(&current_version, &control)
+        })();
+        task_queue::finish(&key);
+        outcome
+    })
+    .await
+    .map_err(|e| format!("更新下载任务崩溃：{e:?}"))?;
+    result.map(|p| p.display().to_string())
+}
+
+/// FR-13：打开已下载的安装包（交给系统安装器，启动器自身不落地安装逻辑）。
+#[tauri::command]
+fn update_install(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("打开安装包失败：{e}"))
 }
 
 /// 读取单个实例。
@@ -374,6 +599,8 @@ async fn mirror_test(source: Option<String>, prefix: Option<String>) -> Result<g
 /// `source-download-progress` 推送 {version, instanceId, received, total}）。
 /// `instance_id` = Some 时落 `versions/<id>/sources/`，None 落全局
 /// `sources/<tag>/`（重名加副本后缀）。返回解压目录。
+/// FR-09：任务键与前端一致（source_archive::task_key），支持暂停 / 继续 /
+/// 取消与 Range 断点续传；受并发额度闸约束。
 #[tauri::command]
 async fn source_download(
     app: tauri::AppHandle,
@@ -381,32 +608,36 @@ async fn source_download(
     instance_id: Option<String>,
 ) -> Result<String, String> {
     use tauri::Emitter;
+    let key = source_archive::task_key(&version, instance_id.as_deref());
+    let control = task_queue::register(&key);
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let emitter = handle.clone();
-        source_archive::download(&version, instance_id.as_deref(), &mut |received, total| {
-            let _ = emitter.emit(
-                source_archive::PROGRESS_EVENT,
-                serde_json::json!({
-                    "version": version,
-                    "instanceId": instance_id,
-                    "received": received,
-                    "total": total,
-                }),
-            );
-        })
+        let outcome = (|| {
+            let _permit = task_queue::acquire(&control)?;
+            source_archive::download(
+                &version,
+                instance_id.as_deref(),
+                Some(&control),
+                &mut |received, total| {
+                    let _ = emitter.emit(
+                        source_archive::PROGRESS_EVENT,
+                        serde_json::json!({
+                            "version": version,
+                            "instanceId": instance_id,
+                            "received": received,
+                            "total": total,
+                        }),
+                    );
+                },
+            )
+        })();
+        task_queue::finish(&key);
+        outcome
     })
     .await
     .map_err(|e| format!("源码下载任务崩溃：{e:?}"))?;
     result.map(|dir| dir.display().to_string())
-}
-
-/// 请求中止进行中的源码归档下载（与 Node 下载共用取消标志，边界见
-/// node_runtime::DOWNLOAD_CANCEL 注释；停滞看门狗至多 60s 后生效）。
-#[tauri::command]
-fn source_download_cancel() -> Result<(), String> {
-    node_runtime::cancel_download();
-    Ok(())
 }
 
 /// 在系统文件管理器中打开指定版本的已下载源码目录（instance_id = Some 开
@@ -549,6 +780,8 @@ async fn dsh_versions() -> Result<Vec<registry_meta::DshVersion>, String> {
 
 /// 把官方 DSH 安装进指定实例（阻塞安装，进度走 `instance-install-progress` 事件）。
 /// 多个实例的安装可并发调用——每个任务在独立 spawn_blocking 线程执行。
+/// FR-09：任务键 `install-<instanceId>`，支持取消（npm 子进程链杀进程收尾；
+/// 暂停/继续不适用于子进程链）；受并发额度闸约束。
 #[tauri::command]
 async fn instance_install_dsh(
     app: tauri::AppHandle,
@@ -556,18 +789,25 @@ async fn instance_install_dsh(
     version: String,
 ) -> Result<dsh_install::InstallOutcome, String> {
     use tauri::Emitter;
+    let key = format!("install-{id}");
+    let control = task_queue::register(&key);
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let emitter = handle.clone();
         let instance_id = id.clone();
-        let stage_sink = move |stage: dsh_install::InstallStage| {
-            let _ = emitter.emit(
-                "instance-install-progress",
-                serde_json::json!({ "instanceId": instance_id, "stage": stage }),
-            );
-        };
-        // InstallStage 不是 Copy，闭包捕获需要再包一层引用转发。
-        dsh_install::install(&id, &version, &mut |stage| stage_sink(stage))
+        let outcome = (|| {
+            let _permit = task_queue::acquire(&control)?;
+            let stage_sink = move |stage: dsh_install::InstallStage| {
+                let _ = emitter.emit(
+                    "instance-install-progress",
+                    serde_json::json!({ "instanceId": instance_id, "stage": stage }),
+                );
+            };
+            // InstallStage 不是 Copy，闭包捕获需要再包一层引用转发。
+            dsh_install::install(&id, &version, &mut |stage| stage_sink(stage), Some(&control))
+        })();
+        task_queue::finish(&key);
+        outcome
     })
     .await
     .map_err(|e| format!("安装任务崩溃：{e:?}"))?;
@@ -665,7 +905,7 @@ async fn instance_launch(
                     ),
                 };
                 emit_launch_progress(&node_app, &node_id, 6, &detail);
-            })
+            }, None)
         })
         .await
         .map_err(|e| format!("运行环境准备任务崩溃：{e:?}"))??;
@@ -816,6 +1056,7 @@ fn plugin_list(id: String) -> Result<plugin_manage::PluginList, String> {
 /// 从市场/展开视图安装一个插件到实例（官方 `dsh plugin add` 链；进度经
 /// `plugin-install-progress` 事件 {instanceId, spec, detail} 推送——spec 供
 /// 前端把插件与整合包的并发安装分流到各自状态行）。
+/// FR-09：任务键 `plugin-<spec>`，支持取消；受并发额度闸约束。
 #[tauri::command]
 async fn plugin_install(
     app: tauri::AppHandle,
@@ -823,16 +1064,23 @@ async fn plugin_install(
     spec: String,
 ) -> Result<market_install::PluginInstallOutcome, String> {
     use tauri::Emitter;
+    let key = format!("plugin-{spec}");
+    let control = task_queue::register(&key);
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let emitter = handle.clone();
         let instance_id = id.clone();
-        market_install::plugin_add(&id, &spec, &mut |detail| {
-            let _ = emitter.emit(
-                market_install::PROGRESS_EVENT,
-                serde_json::json!({ "instanceId": instance_id, "spec": spec, "detail": detail }),
-            );
-        })
+        let outcome = (|| {
+            let _permit = task_queue::acquire(&control)?;
+            market_install::plugin_add(&id, &spec, &mut |detail| {
+                let _ = emitter.emit(
+                    market_install::PROGRESS_EVENT,
+                    serde_json::json!({ "instanceId": instance_id, "spec": spec, "detail": detail }),
+                );
+            }, Some(&control))
+        })();
+        task_queue::finish(&key);
+        outcome
     })
     .await
     .map_err(|e| format!("插件安装任务崩溃：{e:?}"))?;
