@@ -411,19 +411,23 @@ export const launchPage: PageDefinition = {
       const view = deriveVendorView(vendorStatus);
       vendorList.replaceChildren();
       for (const entry of view.entries) {
+        const stateText = entry.hasKey ? "Key 就绪" : "未配置 Key";
         const row = el(
           "button",
           {
             type: "button",
             class: `vendor-switch__item ${entry.id === activeVendorId ? "vendor-switch__item--active" : ""}`,
+            title: stateText,
           },
           [
             el("span", {}, [entry.label]),
-            el(
-              "span",
-              { class: `settings-badge ${entry.hasKey ? "settings-badge--ok" : "settings-badge--bad"}` },
-              [entry.hasKey ? "Key 就绪" : "无 Key"],
-            ),
+            // 行尾状态点（非徽章）：贴右收编整行宽度，替掉原「标签贴左 + 徽章贴右」
+            // 的中部大空白；就绪 = CB3 实点（spec §8.2 成功态不用绿），未配置 = 空心。
+            el("span", { class: "sr-only" }, [stateText]),
+            el("span", {
+              class: `vendor-switch__dot ${entry.hasKey ? "vendor-switch__dot--on" : ""}`,
+              "aria-hidden": "true",
+            }, []),
           ],
         );
         row.addEventListener("click", () => {
@@ -435,30 +439,45 @@ export const launchPage: PageDefinition = {
       }
     }
 
-    /** 一屏可见的列表行数（超出由鼠标滚轮自由滚动）。 */
+    /** 一屏可见的列表行数（超出由鼠标滚轮步进自由滚动）。 */
     const FLOATING_ROWS = 3;
-    /** 浮层与下方内容的保底间距（连 1 行都放不下时才允许贴边）。 */
-    const FLOATING_GAP = 4;
 
     /**
-     * 浮动列表的高度上限：`min(3 行所需高度, 触发器下方到 floor 之间的空白)`。
-     *
-     * 列表绝对定位、不参与文档流，所以展开/收起**一个像素都不推**——这正是
-     * 「不把下面的 UI 下压」的实现方式；再把高度卡到 floor 上方，保证它只占用
-     * 触发器与 floor 之间的空白、绝不盖住 floor 及其下方（厂商列表的 floor 是
-     * 身份块：头像、Key、模型、启动按钮全在它下面，一律不受影响）。
+     * 浮动列表的高度上限：恒定 3 行（2026-10-03 需求方裁决「一次显示三个」）。
+     * 曾经按「触发器下方到 floor 的空白」收缩，窗口矮时塌成 1 行——下拉本就
+     * 该覆盖下方内容，不再按空白收缩；超出的行由滚轮步进滚动。
      */
-    function capFloatingList(list: HTMLElement, trigger: HTMLElement, floor: HTMLElement): void {
+    function capFloatingList(list: HTMLElement, _trigger: HTMLElement, _floor: HTMLElement): void {
       const style = getComputedStyle(list);
       const gap = Number.parseFloat(style.rowGap) || 0;
       const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
       const row = list.firstElementChild?.getBoundingClientRect().height ?? 0;
       const wanted = row > 0 ? FLOATING_ROWS * row + (FLOATING_ROWS - 1) * gap + padding : Infinity;
-      const room = floor.getBoundingClientRect().top - trigger.getBoundingClientRect().bottom - FLOATING_GAP;
-      // 下限一行：窗口很矮时宁可贴着 floor，也不让列表塌成看不见的一条。
-      const least = row > 0 ? row + padding : 0;
-      list.style.maxHeight = `${Math.max(least, Math.min(wanted, room))}px`;
+      list.style.maxHeight = `${wanted}px`;
     }
+
+    /**
+     * 浮层滚轮步进：一格平滑滚一行。原生滚轮一档 ≈100px ≈ 3-4 行，在只有
+     * 3 行高的浮层里就是「1-3、4-6」整页卡跳（2026-10-03 需求方报障）——
+     * 接管滚轮改按行步进，滚动条本身隐藏（CSS），观感即「正常滑动」。
+     */
+    function installWheelStep(list: HTMLElement): void {
+      list.addEventListener(
+        "wheel",
+        (event) => {
+          if (!list.classList.contains("is-open")) return;
+          event.preventDefault();
+          const style = getComputedStyle(list);
+          const gap = Number.parseFloat(style.rowGap) || 0;
+          const row = list.firstElementChild?.getBoundingClientRect().height ?? 0;
+          const step = row > 0 ? row + gap : 24;
+          list.scrollBy({ top: Math.sign(event.deltaY) * step, behavior: "smooth" });
+        },
+        { passive: false },
+      );
+    }
+    installWheelStep(vendorList);
+    installWheelStep(modelList);
 
     /** 展开/收起浮动列表（收起 = 摘掉 .is-open + 去掉浮层定位，回到隐藏态；
      *  R5：显隐走 class 过渡 100ms，不再 hidden 硬切）。 */
@@ -514,12 +533,12 @@ export const launchPage: PageDefinition = {
         avatar.className = "vendor-avatar vendor-avatar--icon";
         const iconImg = el("img", { src: active.icon, alt: "" });
         iconImg.addEventListener("error", () => {
-          avatar.className = `vendor-avatar vendor-avatar--${active.id}`;
+          avatar.className = "vendor-avatar vendor-avatar--letter";
           avatar.replaceChildren(active.monogram);
         });
         avatar.append(iconImg);
       } else {
-        avatar.className = `vendor-avatar vendor-avatar--${active.id}`;
+        avatar.className = "vendor-avatar vendor-avatar--letter";
         avatar.textContent = active.monogram;
       }
       // key 两态：有 key（保险库、环境变量或本会话刚保存）→ 掩码；无 → sk- 占位。
@@ -1260,8 +1279,11 @@ export const launchPage: PageDefinition = {
               monogram: c.name.charAt(0) || "?",
             })),
           ]);
-        } catch {
-          // 目录拉取失败不阻塞页面：回落内置 deepseek 目录。
+        } catch (err) {
+          // 目录拉取失败不阻塞页面：回落内置 deepseek 目录；但回落必须可见——
+          // 静默吞掉会让全部自定义/内置厂商从启动页消失而无人知晓（2026-10-03 排查）。
+          console.error("厂商目录拉取失败", err);
+          showHint("模型厂商目录拉取失败——启动页暂只显示默认厂商");
         }
         try {
           vendorStatus = await getStatus();

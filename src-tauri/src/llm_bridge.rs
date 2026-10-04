@@ -16,10 +16,11 @@
 //! - deepseek 不写路由：bundle 层自带 deepseek-official adapter，Key 吃注入的
 //!   DEEPSEEK_API_KEY，地址覆盖经 DEEPSEEK_BASE_URL 注入（process.rs）；
 //! - 与 pi-ai 目录同名的厂商用目录路由（协议/基址/模型目录全部继承目录）：
-//!   openai/anthropic/groq/cerebras/together/nvidia/huggingface/ant-ling/zai/
-//!   zai-coding-cn/moonshotai/xiaomi/qwen-token-plan(-cn)/minimax(-cn)/
+//!   openai/anthropic/groq/cerebras/together/nvidia/huggingface/ant-ling/
+//!   zai-coding-cn/xiaomi/qwen-token-plan(-cn)/minimax(-cn)/
 //!   kimi-coding/fireworks/vercel-ai-gateway/openrouter；kimi→moonshotai-cn
-//!   （基址与目录完全一致）、gemini→google；
+//!   （基址与目录完全一致）、gemini→google；zai/moonshotai 已随撞名合并
+//!   裁撤（2026-10-03：与内置预设 glm/kimi 同用一把 Key，见 keyvault 迁移）；
 //! - 无目录路由的厂商（glm/qwen/siliconflow/ollama/自定义）写自描述路由：
 //!   api = 按接口形态映射（openai→openai-completions、responses→
 //!   openai-responses、anthropic→anthropic-messages、ollama→openai-completions
@@ -86,9 +87,7 @@ const CATALOG_ROUTES: &[(&str, &str)] = &[
     ("nvidia", "nvidia"),
     ("huggingface", "huggingface"),
     ("ant-ling", "ant-ling"),
-    ("zai", "zai"),
     ("zai-coding-cn", "zai-coding-cn"),
-    ("moonshotai", "moonshotai"),
     ("xiaomi", "xiaomi"),
     ("qwen-token-plan", "qwen-token-plan"),
     ("qwen-token-plan-cn", "qwen-token-plan-cn"),
@@ -109,6 +108,12 @@ fn catalog_route(vendor: &str) -> Option<&'static str> {
         .find(|(id, _)| *id == vendor)
         .map(|(_, route)| *route)
 }
+
+/// 撞名合并（2026-10-03）后已不存在的厂商 id 写下的路由键：纳入管理集但
+/// 永不期望出现，同步时从实例 settings.yaml 清除遗留路由（与「停用撤路由」
+/// 同机制），免得 DSH 里残留一张与合并后卡同名 Key 的影子厂商。
+/// 已知边界：用户在 DSH 网页端手工添加的同名路由也会被清除，接受。
+const LEGACY_ROUTE_KEYS: &[&str] = &["zai", "moonshotai"];
 
 /// 接口形态 → 配置协议名（pi-ai supportedProtocols 三值）；None = 该形态无法
 /// 自描述（gemini 目录路由走 catalog_route，不经此处）。
@@ -160,7 +165,8 @@ fn desired_routes(existing: &Map<String, Value>) -> Result<RouteDesire, String> 
     let status = crate::keyvault::status()?;
     let view = crate::providers::view()?;
 
-    // 全部管理中路由键：每个非 deepseek 厂商（启用与否）+ 每个自定义提供方。
+    // 全部管理中路由键：每个非 deepseek 厂商（启用与否）+ 每个自定义提供方
+    // + 撞名合并裁撤的遗留路由键（只清不写）。
     let mut managed: Vec<String> = Vec::new();
     for entry in &view.catalog {
         if entry.id == "deepseek" {
@@ -170,6 +176,9 @@ fn desired_routes(existing: &Map<String, Value>) -> Result<RouteDesire, String> 
     }
     for custom in &view.custom {
         managed.push(custom.id.clone());
+    }
+    for legacy in LEGACY_ROUTE_KEYS {
+        managed.push((*legacy).to_string());
     }
 
     let mut routes = Map::new();
@@ -260,6 +269,29 @@ fn desired_routes(existing: &Map<String, Value>) -> Result<RouteDesire, String> 
         managed,
         skipped,
     })
+}
+
+/// 遗留路由提供方重映射（撞名合并 2026-10-03）：旧厂商 zai/moonshotai 在
+/// `agent-default-model.provider` 里写下的路由键改指合并后的卡——zai → glm
+/// （glm 自描述路由的键 = 厂商 id）、moonshotai → moonshotai-cn（kimi 的目录
+/// 路由键）。由 inject::read_inject_file 在读路径单点调用（precheck 直读
+/// get_override、物化走 effective_config，两边才能看到一致视图），幂等。
+pub fn remap_legacy_route_provider(settings: &mut serde_json::Map<String, Value>) {
+    const MAP: &[(&str, &str)] = &[("zai", "glm"), ("moonshotai", "moonshotai-cn")];
+    let Some(section) = settings
+        .get_mut("agent-default-model")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let mapped = section
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(|provider| MAP.iter().find(|(from, _)| *from == provider))
+        .map(|(_, to)| to.to_string());
+    if let Some(to) = mapped {
+        section.insert("provider".into(), Value::String(to));
+    }
 }
 
 /// 该厂商在实例里的**提供方 id**（写进 `agent-default-model.provider` 的值）：
@@ -566,6 +598,82 @@ mod tests {
         assert!(
             providers.contains_key("my-own-relay"),
             "外来路由在多次桥接后仍在"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 撞名合并遗留路由（2026-10-03）：实例里旧 zai/moonshotai 路由键已纳入
+    /// 管理集（永不期望），同步时清除，免得 DSH 里残留与合并后卡同名 Key 的
+    /// 影子厂商；真外来路由不受牵连。
+    #[test]
+    fn legacy_pruned_route_keys_removed_on_sync() {
+        let (_lock, tmp) = sandbox("legacy-routes");
+        let instance = instances::create_instance("遗留路由", "web").unwrap();
+        let dir = instances::instance_dir(&instance.id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.yaml"),
+            "llm-pi-ai:\n  providers:\n    zai:\n      api: openai-completions\n      baseURL: https://api.z.ai/api/coding/paas/v4\n    moonshotai:\n      api: openai-completions\n      baseURL: https://api.moonshot.ai/v1\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n",
+        )
+        .unwrap();
+
+        sync_instance(&instance.id).unwrap();
+        let providers = providers_of(&settings_yaml(&instance.id));
+        assert!(
+            !providers.contains_key("zai") && !providers.contains_key("moonshotai"),
+            "遗留路由应被清除：{:?}",
+            providers.keys().collect::<Vec<_>>()
+        );
+        assert!(providers.contains_key("my-own-relay"), "真外来路由仍保留");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 遗留路由提供方重映射：`agent-default-model.provider` 的旧值在 inject
+    /// 读路径改指合并后的卡（precheck 与物化的共同视图）；正常值原样放行；
+    /// 端到端：写旧值读出已重映射。
+    #[test]
+    fn legacy_default_model_provider_remaps_on_read() {
+        let mut settings = json!({ "agent-default-model": { "provider": "zai", "model": "glm-4.7" } })
+            .as_object()
+            .cloned()
+            .unwrap();
+        remap_legacy_route_provider(&mut settings);
+        assert_eq!(settings["agent-default-model"]["provider"], "glm");
+
+        let mut settings =
+            json!({ "agent-default-model": { "provider": "moonshotai", "model": "kimi-k2.5" } })
+                .as_object()
+                .cloned()
+                .unwrap();
+        remap_legacy_route_provider(&mut settings);
+        assert_eq!(settings["agent-default-model"]["provider"], "moonshotai-cn");
+
+        let mut settings = json!({
+            "agent-default-model": { "provider": "deepseek-official", "model": "deepseek-v4-pro" }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        remap_legacy_route_provider(&mut settings);
+        assert_eq!(
+            settings["agent-default-model"]["provider"],
+            "deepseek-official",
+            "正常值不动"
+        );
+
+        let (_lock, tmp) = sandbox("legacy-remap-io");
+        let instance = instances::create_instance("重映射", "web").unwrap();
+        let mut cfg = crate::inject::InjectConfig::default();
+        cfg.settings = json!({ "agent-default-model": { "provider": "zai", "model": "glm-4.7" } })
+            .as_object()
+            .cloned()
+            .unwrap();
+        crate::inject::set_override(&instance.id, &cfg).unwrap();
+        let read_back = crate::inject::get_override(&instance.id).unwrap();
+        assert_eq!(
+            read_back.settings["agent-default-model"]["provider"],
+            "glm",
+            "经 inject 读路径（precheck 同源）已重映射"
         );
         std::fs::remove_dir_all(&tmp).ok();
     }

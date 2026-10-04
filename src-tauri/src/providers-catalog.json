@@ -1,5 +1,5 @@
 {
-  "attribution": "内置提供方目录分两组：curated = 数据参照 models.dev（MIT）与各提供方官方文档交叉核对定稿（T-7 侦察裁决：models.dev 字段不统一且缺 GLM/Kimi/Qwen/Ollama，故落仓库内静态快照，不引入运行时依赖）；dsh = 取自 DSH 本体 llm 层实装的 @earendil-works/pi-ai（MIT）0.82.1 内置 provider 目录（id/label/baseUrl/接口形态/env 名均与 dist/providers/*.js 一一核对），这些提供方 DSH 可原生路由消费。图标 slug 参照 simple-icons（CC0），缺 slug 用字母块兜底。",
+  "attribution": "内置提供方目录分两组：curated = 数据参照 models.dev（MIT）与各提供方官方文档交叉核对定稿（T-7 侦察裁决：models.dev 字段不统一且缺 GLM/Kimi/Qwen/Ollama，故落仓库内静态快照，不引入运行时依赖）；dsh = 取自 DSH 本体 llm 层实装的 @earendil-works/pi-ai（MIT）0.82.1 内置 provider 目录（id/label/baseUrl/接口形态/env 名均与 dist/providers/*.js 一一核对），这些提供方 DSH 可原生路由消费。图标 slug 参照 simple-icons（CC0），缺 slug 用字母块兜底。注意：本目录自此**不是** pi-ai 目录的逐条镜像——zai/moonshotai 与内置预设 glm/kimi 撞用同一环境变量（ZAI_API_KEY / MOONSHOT_API_KEY），已于 2026-10-03 有意裁撤（撞名合并，见 phase-07 日志）；同 Key 的国际端点（api.z.ai / api.moonshot.ai）经 glm/kimi 卡的地址覆盖表达。",
   "providers": [
     { "id": "deepseek", "label": "DeepSeek", "base": "https://api.deepseek.com", "style": "openai", "icon": "deepseek", "group": "curated" },
     { "id": "glm", "label": "GLM（智谱）", "base": "https://open.bigmodel.cn/api/paas/v4", "style": "openai", "icon": null, "group": "curated" },
@@ -18,9 +18,7 @@
     { "id": "nvidia", "label": "NVIDIA", "base": "https://integrate.api.nvidia.com/v1", "style": "openai", "icon": "nvidia", "group": "dsh" },
     { "id": "huggingface", "label": "Hugging Face", "base": "https://router.huggingface.co/v1", "style": "openai", "icon": "huggingface", "group": "dsh" },
     { "id": "ant-ling", "label": "Ant Ling", "base": "https://api.ant-ling.com/v1", "style": "openai", "icon": null, "group": "dsh" },
-    { "id": "zai", "label": "Z.AI", "base": "https://api.z.ai/api/coding/paas/v4", "style": "openai", "icon": null, "group": "dsh" },
     { "id": "zai-coding-cn", "label": "Z.AI Coding CN（智谱编码）", "base": "https://open.bigmodel.cn/api/coding/paas/v4", "style": "openai", "icon": null, "group": "dsh" },
-    { "id": "moonshotai", "label": "Moonshot AI（国际）", "base": "https://api.moonshot.ai/v1", "style": "openai", "icon": "moonshotai", "group": "dsh" },
     { "id": "xiaomi", "label": "小米 MiMo", "base": "https://api.xiaomimimo.com/v1", "style": "openai", "icon": null, "group": "dsh" },
     { "id": "qwen-token-plan", "label": "Qwen Token Plan", "base": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "style": "openai", "icon": null, "group": "dsh" },
     { "id": "qwen-token-plan-cn", "label": "Qwen Token Plan CN", "base": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", "style": "openai", "icon": null, "group": "dsh" },

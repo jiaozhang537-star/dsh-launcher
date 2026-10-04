@@ -16,6 +16,9 @@ const CATEGORIES: { id: string; label: string }[] = [
   { id: "update", label: "检查更新" },
 ];
 
+/** 左栏分类记忆：跨页面重挂载保留（null = 从未离开过默认）。 */
+let lastMoreCategory: string | null = null;
+
 /** 当前运行版本（getVersion 优先，非 Tauri 环境回落构建期常量）。 */
 async function runtimeVersion(): Promise<string> {
   try {
@@ -167,7 +170,8 @@ export const morePage: PageDefinition = {
   id: "more",
   navLabel: "更多",
   render: () => {
-    let category = "about";
+    // 左栏分类记忆：跨页面重挂载保留（同下载页/设置页先例，2026-10-04 走查修复）。
+    let category = lastMoreCategory ?? "about";
     let version = APP_VERSION;
 
     const leftNav = el("div", { class: "sub-left__group" }, []);
@@ -200,6 +204,7 @@ export const morePage: PageDefinition = {
           const found = CATEGORIES.find((c) => c.label === label);
           if (!found || found.id === category) return;
           category = found.id;
+          lastMoreCategory = category;
           renderLeft();
           renderRight();
         });

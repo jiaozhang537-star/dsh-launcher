@@ -93,13 +93,20 @@ fn instance_inject_file(id: &str) -> Result<PathBuf, String> {
 }
 
 /// 读一份 InjectConfig；文件缺失视为空配置。
+/// 读路径单点做遗留路由提供方重映射（撞名合并 2026-10-03）：旧厂商
+/// zai/moonshotai 的 `agent-default-model.provider` 改指合并后的卡——
+/// precheck 直读本函数（get_override）、物化走 effective_config，单点重映射
+/// 才能让两边视图一致；幂等、不回写磁盘。
 fn read_inject_file(path: PathBuf) -> Result<InjectConfig, String> {
     if !path.exists() {
         return Ok(InjectConfig::default());
     }
     let raw =
         std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败：{e}", path.display()))
+    let mut config: InjectConfig =
+        serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败：{e}", path.display()))?;
+    crate::llm_bridge::remap_legacy_route_provider(&mut config.settings);
+    Ok(config)
 }
 
 /// 原子写一份 InjectConfig（临时文件 + 改名）。

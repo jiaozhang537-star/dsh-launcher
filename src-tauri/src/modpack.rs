@@ -798,14 +798,28 @@ fn apply_settings(
                     }
                 }
             }
+            // 撞名合并（2026-10-03）：旧设置包可能携带已裁撤的 zai/moonshotai，
+            // 写入前重映射到并入目标；重映射落点用并集写模型，不覆盖卡上既有清单。
+            let mut remapped = false;
+            if !is_custom {
+                if let Some(mapped) = crate::keyvault::remap_legacy_vendor_id(&vendor_id) {
+                    vendor_id = mapped.to_string();
+                    remapped = true;
+                }
+            }
             let mut vendor_ok = true;
             if crate::keyvault::set_enabled(&vendor_id, v.enabled).is_err() {
                 vendor_ok = false;
             }
-            if !v.models.is_empty()
-                && crate::keyvault::set_models(&vendor_id, &v.models).is_err()
-            {
-                vendor_ok = false;
+            if !v.models.is_empty() {
+                let write = if remapped {
+                    crate::keyvault::merge_models(&vendor_id, &v.models)
+                } else {
+                    crate::keyvault::set_models(&vendor_id, &v.models)
+                };
+                if write.is_err() {
+                    vendor_ok = false;
+                }
             }
             if let Some(addr) = &v.address {
                 if !is_custom && crate::keyvault::set_address(&vendor_id, addr).is_err() {
@@ -986,6 +1000,48 @@ mod tests {
             .unwrap()
             .inject_settings
             .contains_key("llm-deepseek"));
+    }
+
+    /// 撞名合并（2026-10-03）：旧设置包携带的 zai 厂商条目导入时重映射为
+    /// glm 内置卡；模型清单与卡上既有清单并集（不覆盖），地址继承（glm 卡
+    /// 原无地址）。
+    #[test]
+    fn legacy_vendor_entries_remap_on_settings_import() {
+        let (_lock, tmp) = crate::instances::tests::sandbox("modpack-legacy-vendor");
+        crate::keyvault::set_enabled("glm", true).unwrap();
+        crate::keyvault::set_models("glm", &["glm-mine".to_string()]).unwrap();
+
+        let settings = SettingsSection {
+            vendors: vec![VendorEntry {
+                vendor: "zai".into(),
+                enabled: true,
+                models: vec!["glm-4.7".into(), "glm-5.1".into()],
+                address: Some("https://api.z.ai/api/coding/paas/v4".into()),
+                name: None,
+                style: None,
+            }],
+            inject_settings: serde_json::Map::new(),
+            agents_md: None,
+        };
+        let mut report = ImportReport::default();
+        apply_settings(&settings, SettingsTarget::Global, "unused", &mut report, &mut |_| {});
+        assert!(report.warnings.is_empty(), "重映射不应产生警告：{:?}", report.warnings);
+
+        let st = crate::keyvault::status().unwrap();
+        assert!(st.vendors.iter().all(|v| v.vendor != "zai"), "裁撤 id 不落卡");
+        let glm = st.vendors.iter().find(|v| v.vendor == "glm").unwrap();
+        assert!(glm.enabled);
+        assert_eq!(
+            glm.models,
+            vec!["glm-mine", "glm-4.7", "glm-5.1"],
+            "重映射落 glm 卡且模型并集保序"
+        );
+        assert_eq!(
+            glm.address.as_deref(),
+            Some("https://api.z.ai/api/coding/paas/v4"),
+            "地址继承（glm 卡原无地址）"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

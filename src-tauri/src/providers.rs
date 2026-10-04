@@ -282,7 +282,7 @@ mod tests {
             "FR-20：11 精选内置"
         );
         assert!(
-            catalog.iter().filter(|e| e.group == "dsh").count() >= 17,
+            catalog.iter().filter(|e| e.group == "dsh").count() >= 15,
             "DSH 内置（pi-ai 原生实装）预设必须成组在列"
         );
         let mut ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
@@ -290,18 +290,27 @@ mod tests {
         let before = ids.len();
         ids.dedup();
         assert_eq!(ids.len(), before, "id 不得重复");
+        // 撞名合并（2026-10-03）：与内置预设 glm/kimi 同用一把 Key 的 zai/
+        // moonshotai 已裁撤，不得回流（回流即恢复「同名 Key 双卡后写覆盖」）。
+        for pruned in ["zai", "moonshotai"] {
+            assert!(
+                catalog_entry(pruned).is_none(),
+                "{pruned} 已裁撤，不得回到目录"
+            );
+        }
         for required in [
             "deepseek", "glm", "kimi", "qwen", "openai", "anthropic", "xai", "gemini",
             "siliconflow", "openrouter", "ollama",
         ] {
             assert!(catalog.iter().any(|e| e.id == required), "缺 {required}");
         }
-        // DSH 内置组抽样：base/env 全部对齐 pi-ai 实装（R5b 扩编）。
+        // DSH 内置组抽样：base/env 全部对齐 pi-ai 实装（R5b 扩编；zai 已裁撤，
+        // 抽样换其国内同源条目 zai-coding-cn）。
         for (id, base) in [
             ("groq", "https://api.groq.com/openai/v1"),
             ("minimax", "https://api.minimax.io/anthropic"),
             ("kimi-coding", "https://api.kimi.com/coding"),
-            ("zai", "https://api.z.ai/api/coding/paas/v4"),
+            ("zai-coding-cn", "https://open.bigmodel.cn/api/coding/paas/v4"),
         ] {
             let entry = catalog_entry(id).unwrap_or_else(|| panic!("缺 DSH 内置 {id}"));
             assert_eq!(entry.group, "dsh");

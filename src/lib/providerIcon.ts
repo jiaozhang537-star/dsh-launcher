@@ -2,16 +2,15 @@
 
 /**
  * 目录 id → 品牌图文件名（不含扩展名）。同品牌变体共用一张图：
- * kimi/moonshotai/kimi-coding→kimi，qwen-token-plan(-cn)→qwen，
+ * kimi/kimi-coding→kimi，qwen-token-plan(-cn)→qwen，
  * minimax-cn→minimax，zai-coding-cn→glm（智谱现以 Z.ai 品牌统一）。
+ * zai/moonshotai 已随撞名合并裁撤（并入 glm/kimi 卡，2026-10-03）。
  */
 const PROVIDER_ICON_BRANDS: Readonly<Record<string, string>> = {
   deepseek: "deepseek",
   glm: "glm",
   "zai-coding-cn": "glm",
-  zai: "zai",
   kimi: "kimi",
-  moonshotai: "kimi",
   "kimi-coding": "kimi",
   qwen: "qwen",
   "qwen-token-plan": "qwen",

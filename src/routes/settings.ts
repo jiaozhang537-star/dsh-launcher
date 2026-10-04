@@ -2,7 +2,7 @@
 import { el, pclCheck } from "../lib/dom";
 import { icon } from "../lib/icons";
 import type { PageDefinition } from "../router";
-import { DSH_HOTKEY_GROUPS, DSH_HOTKEYS } from "../lib/dsh-hotkeys";
+import { DSH_SHORTCUTS, DSH_SHORTCUT_SECTIONS } from "../lib/dsh-hotkeys";
 import {
   cancelDownload,
   detectSystemNode,
@@ -1416,35 +1416,63 @@ async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
 
 // ===== 热键 =====
 
-/** 设置·热键 = DSH 网页端原版快捷键的只读速查（2026-09-25 需求方裁决）：
- * 热键只有「DSH 网页端操作快捷键」一个含义，启动器不设自身快捷键；
- * DSH 键位硬编码、无配置机制，整页只读、无任何编辑控件。
- * 目录基线 = BASELINE_DSH_VERSION（BASELINE_VERIFIED_RANGE 实测一致，DSH 升级后复检），数据见 lib/dsh-hotkeys.ts。 */
+/** 设置·热键 = DSH 0.2.0 快捷键体系速查（2026-10-04 需求方指令，推翻 P4.5「键位硬编码」
+ * 旧结论——旧侦察只覆盖 0.1.x web 源码，0.2.0-rc 起官方有 dsh-client-shortcuts 快捷键系统）。
+ * 版式（需求方指定，PCL 语言）：**一个快捷键一张卡**——名字加大加粗深色（PCL 卡标题语言），
+ * 右侧键位为蓝描边方框按钮（PCL MyButton 蓝皮肤 = .btn--ghost 同款：半透白底 + CB2 描边 +
+ * 文字同色；纯展示不可点，无编辑通道）。键位取 web:windows 档默认（启动器实例是 web 运行时）；
+ * 编辑在实例网页 设置 → 快捷键 原生编辑器进行（桌面壳存 keybindings.json、web 存浏览器
+ * localStorage，启动器无存储桥不代管）。数据见 lib/dsh-hotkeys.ts。 */
 function renderHotkeysPane(pane: HTMLElement): void {
   pane.replaceChildren();
-  pane.append(el("p", { class: "settings-path" }, ["DSH 网页端原版快捷键（只读，由 DSH 本体决定）。"]));
-  for (const group of DSH_HOTKEY_GROUPS) {
-    const list = el("div", { class: "hotkey-list" }, []);
-    for (const entry of DSH_HOTKEYS.filter((e) => e.group === group.id)) {
-      list.append(
-        el("div", { class: "hotkey-row" }, [
-          el("span", { class: "hotkey-row__label" }, [entry.label]),
-          el("span", { class: "hotkey-row__keys" }, entry.keys.map((key) => el("kbd", { class: "hotkey-kbd" }, [key]))),
+  for (const section of DSH_SHORTCUT_SECTIONS) {
+    // 小标只保留「固定」：它标记不可编辑区的起点；「可编辑」小标删除（2026-10-04 需求方指令）——
+    // 固定之前的全部即默认可编辑，无需赘述。
+    if (section.id === "fixed") {
+      pane.append(el("p", { class: "hotkey-group" }, [section.label]));
+    }
+    for (const entry of DSH_SHORTCUTS.filter((entry) => entry.section === section.id)) {
+      pane.append(
+        el("div", { class: "hotkey-item" }, [
+          el("span", { class: "hotkey-item__name" }, [entry.label]),
+          el("span", { class: "hotkey-keybtn" }, renderComboKeys(entry.keys)),
         ]),
       );
     }
-    pane.append(el("h2", { class: "card__title" }, [group.label]), list);
   }
 }
 
+/** 键位组合 → 蓝描边按钮内容：组合内键用 + 分隔，多组合间用 / 分隔（如 Esc / Esc）。 */
+function renderComboKeys(keys: string[]): (Node | string)[] {
+  const out: (Node | string)[] = [];
+  keys.forEach((combo, comboIndex) => {
+    if (comboIndex > 0) out.push("/");
+    combo
+      .split("+")
+      .map((key) => key.trim())
+      .filter((key) => key !== "")
+      .forEach((key, keyIndex) => {
+        if (keyIndex > 0) out.push(el("span", { class: "hotkey-keybtn__plus" }, ["+"]));
+        out.push(key);
+      });
+  });
+  return out;
+}
+
 // ===== 页面壳 =====
+
+type SettingsCategory = "providers" | "config" | "hotkeys";
+
+/** 左栏分类记忆：跨页面重挂载保留（同下载页 lastDlCategory 先例，2026-10-04 走查修复——
+ *  闭包局部变量会在 启动页↔设置 往返时把分类重置回模型提供商）。 */
+let lastSettingsCategory: SettingsCategory = "providers";
 
 export const settingsPage: PageDefinition = {
   id: "settings",
   navLabel: "设置",
   render: () => {
-    type Category = "providers" | "config" | "hotkeys";
-    let category: Category = "providers";
+    type Category = SettingsCategory;
+    let category: Category = lastSettingsCategory;
     const categories: { id: Category; label: string }[] = [
       { id: "providers", label: "模型提供商" },
       { id: "config", label: "配置" },
@@ -1482,6 +1510,7 @@ export const settingsPage: PageDefinition = {
           const found = categories.find((c) => c.label === label);
           if (!found || found.id === category) return;
           category = found.id;
+          lastSettingsCategory = category;
           renderLeft();
           renderRight();
         });

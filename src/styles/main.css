@@ -189,6 +189,14 @@ button {
   height: 100%;
   display: flex;
   min-height: 0;
+  /* 入场动画的过冲必须裁在页盒内：左栏 Scale 0.96→1 走 OutBack（过冲 ~1.0044，
+     底边越出页面底边 ≈1px）、右栏 translateY(-16→0) 过冲 ≈+1.6px。WPF 里
+     RenderTransform 不产生滚动区域，PCL 同款动效无事；Chromium 会把变换后
+     的边界计入祖先 .app-main 的可滚动溢出——溢出哪怕 1px 也闪现滚动条，
+     整页缩 8px 再随动画落定恢复（走查 2026-10-03：切页时「滚动条出现↔卡片
+     变短、滚动条消失↔卡片恢复」）。clip 只裁画不建滚动容器，fixed 弹窗
+     （modal-overlay）不受祖先裁剪影响，页内浮动下拉锚点均在页盒内。 */
+  overflow: clip;
 }
 
 .card {
@@ -450,6 +458,7 @@ button {
 
 .model-select__item {
   padding: 3px 10px;
+  border: 0; /* 同厂商行：button UA 默认描边必须显式清除 */
   border-radius: var(--radius-float);
   background: transparent;
   color: var(--gray1);
@@ -652,48 +661,58 @@ button {
   cursor: pointer;
 }
 
-/* ===== 热键（DSH 网页端原版快捷键只读目录） ===== */
-.hotkey-list {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: flex-start;
-  width: 100%;
-  gap: 8px;
-  border: 1px solid var(--color-bg-page-alt);
-  border-radius: var(--radius-md);
-  background: var(--white);
-  padding: 12px 16px;
+/* ===== 热键（DSH 0.2.0 快捷键体系速查：一卡一键，PCL MyCard + MyButton 蓝皮肤语言，纯展示不可点） ===== */
+.hotkey-group {
+  margin: 0 0 8px;
+  font-size: var(--fs-info);
+  color: var(--gray3);
 }
 
-.hotkey-row {
+/* 一快捷键一卡：MyCard 范式（白底/圆角/卡影，hover 加深），名字加大加粗深色（PCL 卡标题语言）。 */
+.hotkey-item {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-card);
+  background: var(--white);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow var(--anim-norm) var(--ease-out);
 }
 
-.hotkey-row__label {
-  flex: 1;
+.hotkey-item:hover {
+  box-shadow: var(--shadow-card-hover);
 }
 
-.hotkey-row__keys {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 4px;
-}
-
-.hotkey-kbd {
-  display: inline-block;
-  padding: 1px 8px;
-  border: 1px solid var(--color-bg-page-alt);
-  border-bottom-width: 2px;
-  border-radius: 6px;
-  background: var(--color-bg-page);
-  font-family: var(--font-mono, Consolas, monospace);
-  font-size: var(--font-size-sm);
-  line-height: 1.6;
+.hotkey-item__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--cb1);
+}
+
+/* 键位按钮：PCL MyButton 蓝皮肤（半透白底 + 1px CB2 描边 + 文字同色，r3）——纯展示不可点。 */
+.hotkey-keybtn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--cb2);
+  border-radius: var(--radius-btn);
+  background: var(--half-white);
+  color: var(--cb2);
+  font-size: var(--fs-body);
+  white-space: nowrap;
+}
+
+.hotkey-keybtn__plus {
+  color: var(--cb5);
+  margin: 0 2px;
 }
 
 /* 折叠列表：浮层展开（.is-floating），只占触发器下方到"下界"之间的空白——
@@ -754,9 +773,12 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  /* 行高压到 21px 一级：厂商按钮与身份块之间只有约 77px 空白，3 行必须落进去
-     （徽章是这一行的实际高度上限，故另见下面的徽章内边距收窄）。 */
-  padding: 1px 10px;
+  /* 行高 26 = 菜单行手感（§4.3 item）；右侧状态点收编整行宽度——
+     原「标签贴左 + 徽章贴右」的中部大空白被读作「牙缝」（2026-10-03 UI 重做）。
+     border:0 必须显式声明：button 的 UA 默认描边一直在渲染（行框假象）。 */
+  min-height: 26px;
+  padding: 0 10px;
+  border: 0;
   border-radius: var(--radius-float);
   background: transparent;
   color: var(--gray1);
@@ -768,9 +790,21 @@ button {
   transition: background-color var(--anim-norm) var(--ease-out);
 }
 
-/* 仅本列表的徽章收窄内边距（设置页的同名徽章不受影响）。 */
-.vendor-switch__item .settings-badge {
-  padding: 1px 8px;
+/* 行尾状态点：Key 就绪 = `--cb3` 实点（spec §8.2 成功态表达：不用自造绿）；
+   未配置 = `--gray5` 空心点。与胶囊「已配置」点的语言同构，替掉原红/蓝徽章——
+   徽章贴右 + 大空白即「牙缝」，红色「无 Key」也超出菜单语境（红=危险专用）。 */
+.vendor-switch__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--gray5);
+  background: transparent;
+}
+
+.vendor-switch__dot--on {
+  border-color: var(--cb3);
+  background: var(--cb3);
 }
 
 /* 下拉行（spec §4.3 MyComboBox item）：hover CB8（fast）、选中 CB6 底 + CB3 字 */
@@ -819,11 +853,22 @@ button {
   object-fit: contain;
 }
 
-.vendor-avatar--deepseek {
-  background: var(--brand-deepseek);
+/* 字母头像块（无素材厂商回退，2026-10-03 需求方裁决：矩形边框 + 蓝填充 + 大字母）：
+   填充 = --cb3（主题联动蓝），描边 = --cb2 深一档收边；字母白字粗体大写。
+   尺寸 56：与内置图标同框对视——官方 PNG 自带留白，84 框 contain 后可见内容
+   仅 ~52px（glm.png 实测），84 满框字母块即「图标太大」；56 略大于 52 保证
+   字母舒展。原回退类名 `--<id>` 无 CSS 可挂，裸字母无框无底且字号随正文。 */
+.vendor-avatar--letter {
+  width: 56px;
+  height: 56px;
+  border: 2px solid var(--cb2);
+  border-radius: 11px;
+  background: var(--cb3);
   color: var(--white);
-  font-size: 34px;
+  font-size: 26px;
   font-weight: 700;
+  text-transform: uppercase;
+  line-height: 1;
 }
 
 /* 细长 API 输入行：可选填写；保存写入与设置页共用的 DPAPI 保险库 */
@@ -1505,6 +1550,12 @@ button {
   border-radius: var(--radius-float);
   background: var(--white);
   box-shadow: var(--shadow-float);
+  /* 折叠高度动画（anim.ts collapseToggle）逐帧改高度，WebView2 的滚动锚定
+     会跟着逐帧换锚点/补偿 scrollTop，与 150ms 过渡互相拉扯——滚动条上下蹦跳
+     （PCL/WPF 无锚定机制故无此现象）。把动画子树排除出锚定候选即可：
+     锚点恒落在折叠条或外部卡片上，补偿不再逐帧抖动；feed 等整列表重渲染
+     的视口锚定不受影响。 */
+  overflow-anchor: none;
 }
 
 .collapse-group__list[hidden] {
@@ -3114,6 +3165,17 @@ button {
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* 启动页两个浮层（厂商/模型下拉）：滚动条隐藏（2026-10-03 需求方裁决），
+   滚动由 launch.ts 的滚轮步进接管（一格一行平滑），不显滚动条。 */
+.vendor-switch__list.is-floating,
+.model-select__list.is-floating {
+  scrollbar-width: none;
+}
+.vendor-switch__list.is-floating::-webkit-scrollbar,
+.model-select__list.is-floating::-webkit-scrollbar {
+  display: none;
 }
 
 /* ===== 左下轻提示（Phase 5 S5 · spec G6 PanHint）=====

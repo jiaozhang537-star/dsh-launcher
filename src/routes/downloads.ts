@@ -515,7 +515,16 @@ export const downloadsPage: PageDefinition = {
       );
     }
 
-    const __scheduleCascade = () => enterItems(Array.from(rightContent.children) as HTMLElement[]);
+    // 入场级联开关：版本数据**异步到达**后的重绘不重播——切页入场（router
+    // enterPage）已经播过一次，数据回来再整栏 replaceChildren + 级联，等于把
+    // 刚落定的内容换成透明副本重来，视觉上「拉出来、消失、再拉出来」闪一道
+    // （走查 2026-10-03）。用户点左栏分类回到 dsh 页的重绘是主动换内容，
+    // 级联照常。
+    let cascadeOnRender = true;
+    const __scheduleCascade = () => {
+      if (!cascadeOnRender) return;
+      enterItems(Array.from(rightContent.children) as HTMLElement[]);
+    };
     function renderRight(): void {
       if (category !== "dsh") {
         if (category === "plugins") {
@@ -544,7 +553,10 @@ export const downloadsPage: PageDefinition = {
         versionsError = String(err).slice(0, 200);
         console.error("dsh 版本列表拉取失败", err);
       }
+      // 数据到达 = 内容就位，不是「换了一个新页面」：静默替换加载卡，不重播入场。
+      cascadeOnRender = false;
       renderRight();
+      cascadeOnRender = true;
     }
 
     void (async () => {

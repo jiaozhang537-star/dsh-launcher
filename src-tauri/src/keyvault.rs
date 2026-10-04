@@ -34,6 +34,19 @@ pub const VENDOR_GITHUB: &str = "github";
 /// 仅作设置页默认勾选项，用户可添加任意非空模型 id。
 pub const DEEPSEEK_KNOWN_MODELS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
 
+/// GLM 默认模型种子（取自 pi-ai 0.82.1 目录 data/zai.json）。**不用于新建
+/// glm 条目**（沿用「模型拉取/手填」流程），只在撞名合并迁移把旧 zai 卡
+/// 数据并入 glm 且模型清单为空时补种——原 zai 卡的模型来自 pi-ai 运行时
+/// 目录、vault 清单常为空，不补种则 glm 自描述路由会因无模型被跳过。
+const GLM_KNOWN_MODELS: &[&str] = &[
+    "glm-4.5-air",
+    "glm-4.7",
+    "glm-5-turbo",
+    "glm-5.1",
+    "glm-5.2",
+    "glm-5v-turbo",
+];
+
 /// 厂商 → 注入环境变量名映射（进程环境是 credentials-local 的最高优先
 /// 通道）。取值 = pi-ai 上游 provider 目录的规范名（best-effort：DSH 侧
 /// 路由可经 apiKeyEnv 自定其它 ref，届时还有 `$DSH_HOME/.credentials.yaml`
@@ -45,7 +58,7 @@ pub fn vendor_env_name(vendor: &str) -> Option<&'static str> {
         "anthropic" => Some("ANTHROPIC_API_KEY"),
         "gemini" => Some("GEMINI_API_KEY"),
         "glm" => Some("ZAI_API_KEY"),
-        "kimi" | "moonshotai" => Some("MOONSHOT_API_KEY"),
+        "kimi" => Some("MOONSHOT_API_KEY"),
         "qwen" => Some("DASHSCOPE_API_KEY"),
         "qwen-token-plan" => Some("QWEN_TOKEN_PLAN_API_KEY"),
         "qwen-token-plan-cn" => Some("QWEN_TOKEN_PLAN_CN_API_KEY"),
@@ -58,7 +71,6 @@ pub fn vendor_env_name(vendor: &str) -> Option<&'static str> {
         "nvidia" => Some("NVIDIA_API_KEY"),
         "huggingface" => Some("HF_TOKEN"),
         "ant-ling" => Some("ANT_LING_API_KEY"),
-        "zai" => Some("ZAI_API_KEY"),
         "zai-coding-cn" => Some("ZAI_CODING_CN_API_KEY"),
         "xiaomi" => Some("XIAOMI_API_KEY"),
         "minimax" => Some("MINIMAX_API_KEY"),
@@ -268,7 +280,71 @@ fn load_vault() -> Result<Vault, String> {
         return Ok(default_vault());
     }
     let raw = paths::read_text(&file)?;
-    migrate(&raw)
+    let mut vault = migrate(&raw)?;
+    migrate_legacy_vendor_ids(&mut vault);
+    Ok(vault)
+}
+
+/// 撞名合并的遗留厂商 id（2026-10-03 需求方裁决）：zai 与内置预设 glm 同用
+/// `ZAI_API_KEY`、moonshotai 与 kimi 同用 `MOONSHOT_API_KEY`，旧版两卡并存时
+/// 注入循环按 vault 顺序后写覆盖前写（phase-03 R5b 记录在案）——同名 Key 只
+/// 保留一张卡，裁撤目录 id 并把存量数据并入内置预设。
+///
+/// 迁移在 load_vault 的**内存视图**上执行，幂等、不落盘；下次任何 set_* 走
+/// load→改→save 时迁移结果自然持久化。合并语义：
+/// - enabled 取或；
+/// - Key / 地址保留目标卡现有值，为空才继承来源卡；
+/// - 模型清单并集（目标在前、保序去重）；
+/// - 并入 zai 且模型清单仍为空的 glm 条目用 GLM_KNOWN_MODELS 补种（原 zai 卡
+///   的模型来自 pi-ai 运行时目录，vault 清单常为空）。
+pub(crate) fn migrate_legacy_vendor_ids(vault: &mut Vault) {
+    for (legacy, target) in [("zai", "glm"), ("moonshotai", "kimi")] {
+        let Some(pos) = vault.vendors.iter().position(|v| v.vendor == legacy) else {
+            continue;
+        };
+        let source = vault.vendors.remove(pos);
+        let entry = entry_or_default(vault, target);
+        if entry.ciphertext_b64.is_none() {
+            entry.ciphertext_b64 = source.ciphertext_b64;
+        }
+        if entry.address.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+            entry.address = source.address;
+        }
+        let mut models = std::mem::take(&mut entry.models);
+        models.extend(source.models);
+        if models.is_empty() && target == "glm" {
+            models.extend(GLM_KNOWN_MODELS.iter().map(|s| s.to_string()));
+        }
+        entry.models = normalize_models(&models);
+        entry.enabled = entry.enabled || source.enabled;
+    }
+}
+
+/// 遗留厂商 id → 并入目标（设置包导入等「按原样 id 落 vault」的入口在写入前
+/// 重映射用）。非遗留 id 返回 None。
+pub fn remap_legacy_vendor_id(vendor: &str) -> Option<&'static str> {
+    match vendor {
+        "zai" => Some("glm"),
+        "moonshotai" => Some("kimi"),
+        _ => None,
+    }
+}
+
+/// 并集写入模型清单（撞名合并导入路径用）：现值在前、新值在后，保序去重，
+/// 不覆盖既有清单——与覆盖式 set_models 相对。
+pub fn merge_models(vendor: &str, models: &[String]) -> Result<(), String> {
+    if !valid_vendor(vendor) {
+        return Err(format!("不支持的模型厂商：{vendor:?}"));
+    }
+    if models.is_empty() {
+        return Ok(());
+    }
+    let mut vault = load_vault()?;
+    let entry = entry_or_default(&mut vault, vendor);
+    let mut combined = std::mem::take(&mut entry.models);
+    combined.extend(models.iter().cloned());
+    entry.models = normalize_models(&combined);
+    save_vault(&vault)
 }
 
 /// 原子写保险库。
@@ -748,6 +824,16 @@ mod tests {
         assert_eq!(vendor_env_name("anthropic"), Some("ANTHROPIC_API_KEY"));
         assert_eq!(vendor_env_name("kimi"), Some("MOONSHOT_API_KEY"));
         assert_eq!(vendor_env_name("ollama"), None, "本地网关免 Key");
+        assert_eq!(
+            vendor_env_name("zai"),
+            None,
+            "撞名合并后裁撤：ZAI_API_KEY 归 glm 卡"
+        );
+        assert_eq!(
+            vendor_env_name("moonshotai"),
+            None,
+            "撞名合并后裁撤：MOONSHOT_API_KEY 归 kimi 卡"
+        );
         assert_eq!(vendor_env_name("nope"), None);
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -800,6 +886,113 @@ mod tests {
         forget_vendor("kimi").unwrap(); // 幂等
         assert!(forget_vendor(VENDOR_GITHUB).is_err(), "github 不在模型厂商列表");
         assert!(forget_vendor("unknown-vendor").is_err(), "未知厂商拒绝");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 撞名合并迁移（2026-10-03 需求方裁决）：遗留 zai/moonshotai 条目并入
+    /// 内置预设卡——enabled 取或、Key/地址目标卡优先、模型并集去重保序。
+    #[test]
+    fn legacy_vendor_ids_merge_into_presets() {
+        let mut vault = Vault {
+            vendors: vec![
+                VaultVendor {
+                    vendor: "glm".into(),
+                    enabled: false,
+                    ciphertext_b64: Some("R0xN".into()),
+                    models: vec!["glm-mine".into()],
+                    address: Some("https://my-relay.example.com".into()),
+                },
+                VaultVendor {
+                    vendor: "zai".into(),
+                    enabled: true,
+                    ciphertext_b64: Some("WkFJ".into()),
+                    models: vec!["glm-4.7".into(), "glm-mine".into(), "glm-extra".into()],
+                    address: Some("https://api.z.ai/api/coding/paas/v4".into()),
+                },
+                VaultVendor {
+                    vendor: "moonshotai".into(),
+                    enabled: true,
+                    ciphertext_b64: None,
+                    models: vec!["kimi-k2.5".into()],
+                    address: None,
+                },
+            ],
+        };
+        migrate_legacy_vendor_ids(&mut vault);
+        assert!(
+            vault.vendors.iter().all(|v| v.vendor != "zai" && v.vendor != "moonshotai"),
+            "遗留 id 不再以卡片形式存在"
+        );
+        let glm = vault.vendors.iter().find(|v| v.vendor == "glm").unwrap();
+        assert!(glm.enabled, "enabled 取或");
+        assert_eq!(glm.ciphertext_b64.as_deref(), Some("R0xN"), "Key 保留目标卡现值");
+        assert_eq!(
+            glm.address.as_deref(),
+            Some("https://my-relay.example.com"),
+            "地址保留目标卡现值"
+        );
+        assert_eq!(
+            glm.models,
+            vec!["glm-mine", "glm-4.7", "glm-extra"],
+            "模型并集：目标在前、去重保序"
+        );
+        let kimi = vault.vendors.iter().find(|v| v.vendor == "kimi").unwrap();
+        assert!(kimi.enabled);
+        assert!(kimi.ciphertext_b64.is_none(), "目标无 Key 继承来源（来源也无则空）");
+        assert_eq!(kimi.models, vec!["kimi-k2.5"]);
+    }
+
+    /// 孤立 zai 条目（无 glm 卡）→ 整体改名并入；模型清单为空补种 glm 目录
+    /// 模型（原 zai 卡的模型来自 pi-ai 运行时目录，vault 清单常为空，不补种
+    /// 则 glm 自描述路由因无模型被跳过）；迁移必须幂等。
+    #[test]
+    fn legacy_zai_renames_to_glm_and_seeds_models_idempotent() {
+        let mut vault = Vault {
+            vendors: vec![VaultVendor {
+                vendor: "zai".into(),
+                enabled: true,
+                ciphertext_b64: Some("WkFJ".into()),
+                models: Vec::new(),
+                address: None,
+            }],
+        };
+        migrate_legacy_vendor_ids(&mut vault);
+        assert_eq!(vault.vendors.len(), 1);
+        assert_eq!(vault.vendors[0].vendor, "glm");
+        assert!(vault.vendors[0].enabled);
+        assert_eq!(vault.vendors[0].ciphertext_b64.as_deref(), Some("WkFJ"));
+        let seeded = GLM_KNOWN_MODELS.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(vault.vendors[0].models, seeded, "空清单补种 glm 目录模型");
+        let before = serde_json::to_string(&vault).unwrap();
+        migrate_legacy_vendor_ids(&mut vault);
+        assert_eq!(
+            serde_json::to_string(&vault).unwrap(),
+            before,
+            "迁移幂等：二次执行零变化"
+        );
+    }
+
+    /// 磁盘 vault 带遗留 id → 经 load_vault 读出即迁移视图；裁撤 id 从此被
+    /// 白名单拒绝（不再产生新遗留条目）。
+    #[test]
+    fn vault_file_with_legacy_ids_loads_migrated() {
+        let (_lock, tmp) = sandbox("legacy-vault-file");
+        let file = crate::paths::managed_root().unwrap().join(KEYVAULT_FILE);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"vendors":[{"vendor":"zai","enabled":true,"ciphertext_b64":"WkFJ","models":[],"address":null}]}"#,
+        )
+        .unwrap();
+        let st = status().unwrap();
+        assert!(st.vendors.iter().all(|v| v.vendor != "zai"), "读出即迁移");
+        let glm = st.vendors.iter().find(|v| v.vendor == "glm").unwrap();
+        assert!(glm.enabled && glm.has_key);
+        assert_eq!(
+            glm.models,
+            GLM_KNOWN_MODELS.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+        assert!(set_enabled("zai", true).is_err(), "裁撤 id 被白名单拒绝");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
