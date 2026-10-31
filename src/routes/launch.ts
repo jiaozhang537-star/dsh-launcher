@@ -7,6 +7,7 @@ import { webEntryUrl } from "../lib/launch-decision";
 import { sortInstancesForLaunch } from "../lib/instanceOrder";
 import { settledStageText, stepLevelOf, type StepLevel } from "../lib/launchSteps";
 import { getSelectedInstance, setSelectedInstance } from "../lib/selected-instance";
+import { UI_PREFS_EVENT, versionButtonsHidden } from "../lib/uiPrefs";
 import {
   deriveVendorView,
   keySaveEligible,
@@ -604,6 +605,9 @@ export const launchPage: PageDefinition = {
           setSub(SUB_NO_INSTANCE, true);
           return;
         }
+        // 启动链进行中不重复发起（对抗审查 R1 P1-02）：双击/连点会被这里的
+        // 早退挡住；后端另有启动占位锁兜底，两层防线互相独立。
+        if (starting) return;
         // 每次点启动都是一次**独立的完整启动**：实例仍在跑时由后端先停旧进程
         // 再按原钉定端口拉起（运行期注入的环境变量——厂商 Key、基址覆盖——
         // 因此每次都刷新）。前端不做"运行中只开网页"的决策，也不预查进程状态。
@@ -650,7 +654,10 @@ export const launchPage: PageDefinition = {
           // 本次启动已经收过尾就别再处置（取消先回来、就绪、异常退出都算）：
           // 收尾那一步已经如实说过结果，这里再弹一次「启动失败」是自相矛盾。
           if (!starting) return;
-          if (cancelRequested) {
+          // 取消收尾的两个来源（R2 P2-01）：①前端自己点的取消（cancelRequested）；
+          // ②用户在别处点了「停止」——后端 instance_stop 登记取消令牌，启动链
+          // 以「已取消」收场，同样静默收尾，不弹「启动失败」。
+          if (cancelRequested || String(err) === "已取消") {
             // 取消可能与「校验拦截」撞在同一瞬间：按用户取消处置，但拦截结论
             // 不能丢——写进日志缓冲（下次启动照常还会拦一次）。
             const blocked = parseBlockedReport(err);
@@ -793,6 +800,17 @@ export const launchPage: PageDefinition = {
       if (selectedId) setSelectedInstance(selectedId);
       navigate("instance-settings");
     });
+    // 功能隐藏（FR-27）：版本管理两钮可被隐藏（PCL「版本管理」）；F12 临时显示
+    // 即时生效（偏好变更事件），监听走 eventDisposers 切页清理。
+    const syncVersionBtns = (): void => {
+      const hide = versionButtonsHidden();
+      selectBtn.hidden = hide;
+      configBtn.hidden = hide;
+    };
+    syncVersionBtns();
+    const onUiPrefs = (): void => syncVersionBtns();
+    window.addEventListener(UI_PREFS_EVENT, onUiPrefs);
+    eventDisposers.push(() => window.removeEventListener(UI_PREFS_EVENT, onUiPrefs));
 
     // ===== 输出与诊断事件（只进缓冲，主页从不直接渲染）=====
     function linesOf(instanceId: string): string[] {
@@ -1088,10 +1106,19 @@ export const launchPage: PageDefinition = {
       return icon;
     }
 
-    /** 字幕序列渲染：一行 = 图标 + 文案；渲染完把最新一行对齐到窗口底部。 */
+    /** 字幕序列渲染：**固定三行窗口**（需求方 2026-10-24 定稿口径）——只保留
+     *  最近 3 条：最新一条在下（小字进入）、上一条居中（放大）、上上条置顶（小字）；
+     *  第 4 条出现时整体上移一行、最旧一条消失。窗口钉在鲸鱼图标正下方
+     *  （CSS 绝对定位），不贴底、不占满栏。 */
     function renderLaunchSteps(): void {
+      const window3 = launchSteps.slice(-3);
+      // 位置类按「距最新」取：最新 → --new（下，小），上一条 → --cur（中，大），
+      // 更早 → --old（上，小）。不足三条时从下往上缺省（单条 = --new）。
+      const posClass = (fromEnd: number): string =>
+        fromEnd === 0 ? "new" : fromEnd === 1 ? "cur" : "old";
       loadingTrack.replaceChildren(
-        ...launchSteps.map((step) => {
+        ...window3.map((step, index) => {
+          const fromEnd = window3.length - 1 - index;
           const children: HTMLElement[] = [
             stepIcon(Boolean(step.active), step.level),
             el("span", { class: "launch-loading__step-text" }, [step.text]),
@@ -1109,7 +1136,7 @@ export const launchPage: PageDefinition = {
           return el(
             "li",
             {
-              class: `launch-loading__step launch-loading__step--${step.active ? "active" : step.level}`,
+              class: `launch-loading__step launch-loading__step--${step.active ? "active" : step.level} launch-loading__step--${posClass(fromEnd)}`,
             },
             children,
           );
@@ -1119,13 +1146,13 @@ export const launchPage: PageDefinition = {
     }
 
     /**
-     * 字幕滚动：把 track 平移到「最后一行贴住窗口底」的位置——窗口比内容高时
-     * 是正向下沉（最新一行在最下），内容超出时是负向上移（旧行被顶部遮罩吃掉）。
-     * 位移交给 CSS 过渡，观感就是一行一行往上滚。
+     * 字幕滚动：三行窗口的重渲染伴随一次性「上移入列」动画（新行从下一行高度
+     * 滑入、整体升一行，最旧的随之出窗）。动画靠重触发 class 实现，无累计位移。
      */
     function syncRoll(): void {
-      const offset = loadingRoll.clientHeight - loadingTrack.offsetHeight;
-      loadingTrack.style.transform = `translateY(${offset}px)`;
+      loadingTrack.classList.remove("is-entering");
+      void loadingTrack.offsetWidth; // 强制 reflow，让动画类可重复触发
+      loadingTrack.classList.add("is-entering");
     }
 
     /** 每次点启动重置加载页：百分比归零、字幕清空、取消按钮重新可用。 */
@@ -1346,13 +1373,15 @@ export const launchPage: PageDefinition = {
       wave("mid") +
       wave("deep");
     const loadingPane = el("div", { class: "launch-loading", hidden: "" }, [
+      // 常规流整组（2026-10-24 终稿）：鲸鱼 → 三行字幕 → 进度条，居中排布；
+      // 旧版顺序（进度在字幕前）是「字幕贴底大窗」时代的遗留，随布局终稿调换。
       el("div", { class: "launch-loading__body" }, [
         loadingScene,
+        loadingRoll,
         el("div", { class: "launch-loading__progress" }, [
           el("div", { class: "launch-loading__meter" }, [loadingFill]),
           loadingPercent,
         ]),
-        loadingRoll,
       ]),
       cancelBtn,
     ]);

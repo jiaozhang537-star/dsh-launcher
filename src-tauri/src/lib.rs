@@ -6,6 +6,7 @@ mod inject;
 mod instances;
 mod keyvault;
 mod launch_cancel;
+mod launch_flow;
 mod llm_bridge;
 mod log_sentinel;
 mod market;
@@ -15,6 +16,7 @@ mod mirror_config;
 mod modpack;
 mod node_runtime;
 mod paths;
+mod personalize;
 mod plugin_manage;
 mod precheck;
 mod process;
@@ -26,6 +28,8 @@ mod snapshot;
 mod source_archive;
 mod task_queue;
 mod self_update;
+/// 无头 CLI（P7.5 / FR-26）：`main.rs` 分流入口，pub 供 bin crate 调用。
+pub mod cli;
 #[cfg(test)]
 mod verify_dsh;
 
@@ -114,6 +118,12 @@ pub fn run() {
     modpack_peek,
     modpack_import,
     modpack_stage_drop,
+    ui_background_open,
+    ui_background_random,
+    ui_background_clear,
+    ui_logo_get,
+    ui_logo_set,
+    ui_logo_clear,
 ])
         .setup(|app| {
             // 禁止最大化守卫安装（P6 验收补丁，需求方裁决「禁止放大、保留拖边框改尺寸」）。
@@ -247,7 +257,7 @@ async fn node_download(
         return Err(format!("非法版本号：{version:?}"));
     }
     let key = format!("node-{version}");
-    let control = task_queue::register(&key);
+    let control = task_queue::register(&key)?;
     let dist_bases = gateway::node_dist_bases();
     let handle = app.clone();
     let part = task_queue::part_path(&key);
@@ -434,7 +444,7 @@ async fn update_check(current_version: String) -> Result<self_update::UpdateStat
 #[tauri::command]
 async fn update_download(current_version: String) -> Result<String, String> {
     let key = "update".to_string();
-    let control = task_queue::register(&key);
+    let control = task_queue::register(&key)?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         let outcome = (|| {
             let _permit = task_queue::acquire(&control)?;
@@ -609,7 +619,7 @@ async fn source_download(
 ) -> Result<String, String> {
     use tauri::Emitter;
     let key = source_archive::task_key(&version, instance_id.as_deref());
-    let control = task_queue::register(&key);
+    let control = task_queue::register(&key)?;
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let emitter = handle.clone();
@@ -790,7 +800,7 @@ async fn instance_install_dsh(
 ) -> Result<dsh_install::InstallOutcome, String> {
     use tauri::Emitter;
     let key = format!("install-{id}");
-    let control = task_queue::register(&key);
+    let control = task_queue::register(&key)?;
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let emitter = handle.clone();
@@ -848,19 +858,6 @@ fn emit_launch_progress(app: &tauri::AppHandle, instance_id: &str, percent: u8, 
     );
 }
 
-/// 启动命令的完整答复：进程信息 + 校验链报告（前端加载动画据此渲染
-/// 「体检通过 / 告警」清单——报告不再只在被拦截时才有出口）。
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LaunchReply {
-    pub instance_id: String,
-    pub port: u16,
-    pub pid: u32,
-    pub report: precheck::Report,
-    /// 本次启动的实例配置对账结果（插件/Skill/外部提供商相对上次启动的变更）。
-    pub reconcile: snapshot::Reconcile,
-}
-
 /// 启动实例：先跑校验链，存在错误级条目时拒绝并返回报告；
 /// `force = true` 表示用户看过报告后显式放行。
 ///
@@ -878,108 +875,29 @@ pub struct LaunchReply {
 /// 并返回 `Err("已取消启动…")`；已经拉起的进程由 `stop_silently` 停掉（取消命令
 /// 与这里的兜底各停一次，幂等）。取消命令早于 spawn 到达时，进程会被拉起一瞬间
 /// 再被这里的兜底停掉——前端按「自己的取消标记」处置，不按错误文案猜。
+///
+/// 编排本体在 `launch_flow::launch_pipeline`（P7.5 起与无头 CLI 共用同一份）；
+/// 答复形状 = 旧 LaunchReply（camelCase：instanceId/port/pid/report/reconcile）。
 #[tauri::command]
 async fn instance_launch(
     app: tauri::AppHandle,
     id: String,
     force: Option<bool>,
-) -> Result<LaunchReply, String> {
-    // 本次启动开始：清掉上一次留下的取消标记（否则会误伤这一次）。
-    launch_cancel::clear(&id);
-    // 运行环境自愈：没有可用 Node 就先自动代管一个已知良好版本（与安装链
-    // 同一套兜底），预检的 Node 项于是成为"结论"而不是新手要自己解决的任务。
-    if !node_runtime::node_available() {
-        emit_launch_progress(&app, &id, 5, "正在准备 Node 运行环境…");
-        let node_app = app.clone();
-        let node_id = id.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            node_runtime::ensure_default_node(&mut |event| {
-                let detail = match event {
-                    node_runtime::EnsureEvent::Downloading { version } => {
-                        format!("正在自动代管 Node v{version}…")
-                    }
-                    node_runtime::EnsureEvent::Bytes { received, total } => format!(
-                        "正在自动代管 Node（{} / {}）",
-                        node_runtime::fmt_size(received),
-                        node_runtime::fmt_size(total)
-                    ),
-                };
-                emit_launch_progress(&node_app, &node_id, 6, &detail);
-            }, None)
-        })
-        .await
-        .map_err(|e| format!("运行环境准备任务崩溃：{e:?}"))??;
-        ensure_not_cancelled(&id)?;
-    }
-    emit_launch_progress(&app, &id, 8, "正在校验运行环境…");
-    let report = precheck::run(&id)?;
-    ensure_not_cancelled(&id)?;
-    if report.blocked && force != Some(true) {
-        return Err(serde_json::to_string(&report)
-            .unwrap_or_else(|_| r#"{"items":[],"blocked":true}"#.into()));
-    }
-    emit_launch_progress(&app, &id, 45, "正在对账实例配置…");
-    let state = process::process_state(&id)?;
-    let baseline = snapshot::load(&id);
-    let reconcile = match snapshot::collect(&id) {
-        Ok(current) => {
-            let mut reconcile = snapshot::diff(baseline.as_ref(), &current);
-            // 基线落盘失败不阻断启动，但要如实说明：下次启动会退化成"首次"
-            // （只报构成、不报新增），用户能看出对账没生效。
-            if let Err(err) = snapshot::save(&id, &current) {
-                reconcile.note = Some(format!("实例快照未落盘：{err}"));
-            }
-            reconcile
-        }
-        Err(err) => snapshot::Reconcile {
-            note: Some(format!("实例配置对账失败：{err}")),
-            ..Default::default()
-        },
-    };
-    ensure_not_cancelled(&id)?;
-    emit_launch_progress(&app, &id, 55, "正在挂载全局技能目录…");
-    instances::ensure_skills_link(&id)?;
-    ensure_not_cancelled(&id)?;
-    emit_launch_progress(&app, &id, 55, "正在同步模型配置…");
-    if state.running {
-        emit_launch_progress(&app, &id, 64, "实例正在运行，正在重启实例…");
-        process::stop_for_restart(&id)?;
-    }
-    // 配置同步是「不改实例就跑不起来」的必要一步，取消不半途跳过它：取消在
-    // 这之后落地时，改动已写入——它是幂等的，下次启动会照常再做一遍。
-    llm_bridge::sync_instance(&id)?;
-    ensure_not_cancelled(&id)?;
-    emit_launch_progress(&app, &id, 70, "正在拉起实例进程…");
-    let keep_pinned_port = state.running;
-    // 拉起那一步把 id 移进阻塞任务；取消兜底还要问一次令牌，留一份副本。
-    let cancel_id = id.clone();
-    let outcome =
-        tauri::async_runtime::spawn_blocking(move || process::launch(Some(&app), &id, keep_pinned_port))
-            .await
-            .map_err(|e| format!("启动任务崩溃：{e:?}"))??;
-    // spawn 后兜底：取消可能就落在「拉起中」这一小段里——进程已经起来了，就地停掉。
-    if launch_cancel::is_cancelled(&cancel_id) {
-        process::stop_silently(&cancel_id)?;
-        return Err(CANCELLED_MESSAGE.to_string());
-    }
-    Ok(LaunchReply {
-        instance_id: outcome.instance_id,
-        port: outcome.port,
-        pid: outcome.pid,
-        report,
-        reconcile,
+) -> Result<launch_flow::LaunchResult, String> {
+    // 整条链跑在阻塞线程池上（Node 自愈/拉起本就是阻塞活）；进度回调在池线程
+    // 上发 launch-progress 事件，事件序列与抽取前一致。
+    let launch_app = app.clone();
+    let launch_id = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        launch_flow::launch_pipeline(
+            Some(&launch_app),
+            &launch_id,
+            force.unwrap_or(false),
+            &mut |percent, stage| emit_launch_progress(&launch_app, &launch_id, percent, stage),
+        )
     })
-}
-
-/// 取消本次启动的返回文案（前端不据此判断，只用于日志与兜底展示）。
-const CANCELLED_MESSAGE: &str = "已取消启动";
-
-/// 链上检查点：已取消就中断本次启动。
-fn ensure_not_cancelled(instance_id: &str) -> Result<(), String> {
-    if launch_cancel::is_cancelled(instance_id) {
-        return Err(CANCELLED_MESSAGE.to_string());
-    }
-    Ok(())
+    .await
+    .map_err(|e| format!("启动任务崩溃：{e:?}"))?
 }
 
 /// 取消本次启动：登记令牌（启动链下一个检查点就会收尾），并把**已经拉起**的进程
@@ -998,9 +916,13 @@ fn instance_process_state(id: String) -> Result<process::ProcessState, String> {
     process::process_state(&id)
 }
 
-/// 停止实例进程树；未在运行时幂等成功。
+/// 停止实例进程树；未在运行时幂等成功。启动链进行中同样生效（对抗审查
+/// R2 P2-01）：登记取消令牌让链在下一个检查点收尾——旧行为是 no-op 却返回
+/// 成功，进程随后照常被拉起，用户视角「刚停止成功的实例自己跑起来了」。
+/// R1 的代际化保证该标记不误伤下一次启动（标记挂在当前代，新启动用更高代）。
 #[tauri::command]
 fn instance_stop(id: String) -> Result<(), String> {
+    launch_cancel::request(&id);
     process::stop(&id)
 }
 
@@ -1065,7 +987,7 @@ async fn plugin_install(
 ) -> Result<market_install::PluginInstallOutcome, String> {
     use tauri::Emitter;
     let key = format!("plugin-{spec}");
-    let control = task_queue::register(&key);
+    let control = task_queue::register(&key)?;
     let handle = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let emitter = handle.clone();
@@ -1265,4 +1187,42 @@ fn modpack_stage_drop(name: String, bytes: Vec<u8>) -> Result<String, String> {
     let path = dir.join(&base);
     std::fs::write(&path, bytes).map_err(|e| format!("写入暂存文件失败：{e}"))?;
     Ok(path.display().to_string())
+}
+
+// ===== 个性化（FR-27，P7.5）：命令薄壳，本体在 personalize.rs =====
+
+/// 打开背景图片文件夹（不存在则创建）。
+#[tauri::command]
+fn ui_background_open(app: tauri::AppHandle) -> Result<(), String> {
+    personalize::background_open(&app)
+}
+
+/// 随机取一张背景图（data URL；空文件夹 = None）。
+#[tauri::command]
+fn ui_background_random() -> Result<Option<personalize::PersonalizeImage>, String> {
+    personalize::background_random()
+}
+
+/// 清空背景图片文件夹里的图片，返回清掉张数。
+#[tauri::command]
+fn ui_background_clear() -> Result<u32, String> {
+    personalize::background_clear().map(|n| n as u32)
+}
+
+/// 当前标题栏图片（未设置 = None）。
+#[tauri::command]
+fn ui_logo_get() -> Result<Option<personalize::PersonalizeImage>, String> {
+    personalize::logo_get()
+}
+
+/// 从文件设置标题栏图片（复制进托管根）。
+#[tauri::command]
+fn ui_logo_set(src: String) -> Result<personalize::PersonalizeImage, String> {
+    personalize::logo_set_from(&src)
+}
+
+/// 清除标题栏图片。
+#[tauri::command]
+fn ui_logo_clear() -> Result<bool, String> {
+    personalize::logo_clear()
 }

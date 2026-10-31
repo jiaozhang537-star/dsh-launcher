@@ -34,16 +34,17 @@ pub const PROGRESS_EVENT: &str = "plugin-install-progress";
 
 /// 确保 pnpm shim 就位，返回 shim 目录。
 /// 已存在则跳过（幂等）；首次生成时 corepack 从镜像拉取 pnpm（数百 KB 级）。
+/// shim 文件名随平台（对抗审查 R1 P1-06：Windows `pnpm.CMD`，其他平台 `pnpm`）。
 pub fn ensure_pnpm_shim(node_exe: &Path) -> Result<PathBuf, String> {
     let dir = shim_dir()?;
-    let pnpm_cmd = dir.join("pnpm.CMD");
+    let pnpm_cmd = dir.join(pnpm_shim_name());
     if pnpm_cmd.is_file() {
         return Ok(dir);
     }
     let node_dir = node_exe
         .parent()
-        .ok_or_else(|| "node.exe 路径异常".to_string())?;
-    let corepack = node_dir.join("corepack.cmd");
+        .ok_or_else(|| "Node 可执行文件路径异常".to_string())?;
+    let corepack = node_dir.join(corepack_name());
     if !corepack.is_file() {
         return Err(format!(
             "该 Node 缺自带 corepack（{} 不存在），无法供给 pnpm——请到「设置」页下载并代管官方便携版 Node",
@@ -71,7 +72,8 @@ pub fn ensure_pnpm_shim(node_exe: &Path) -> Result<PathBuf, String> {
 }
 
 /// 组装官方链子进程：`node <bin.js> plugin --profile <p> <args…>`，
-/// PATH 前置 [node 目录, pnpm shim 目录]，corepack/pnpm 走 npmmirror。
+/// PATH 前置 [node 目录, pnpm shim 目录]（std 可移植原语组装，分隔符随平台
+/// ——对抗审查 R1 P1-06），corepack/pnpm 走 npmmirror。
 /// **DSH_HOME 必须钉到实例目录**——官方链靠它解析 profile 落点（真机教训：
 /// 漏设时安装会静默落进用户全局 `~/.dsh`，污染真实环境）。
 fn plugin_command(
@@ -82,22 +84,21 @@ fn plugin_command(
     profile: &str,
     args: &[&str],
     registry_base: &str,
-) -> Command {
+) -> Result<Command, String> {
     let mut cmd = Command::new(node_exe);
     cmd.arg(bin_js)
         .args(["plugin", "--profile", profile])
         .args(args)
-        .env("DSH_HOME", dsh_home)
-        .env(
-            "PATH",
-            format!(
-                "{};{};{}",
-                node_exe.parent().unwrap_or(Path::new(".")).display(),
-                shim.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("COREPACK_NPM_REGISTRY", registry_base)
+        .env("DSH_HOME", dsh_home);
+    let mut path_entries = vec![
+        node_exe.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        shim.to_path_buf(),
+    ];
+    path_entries.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let path_env =
+        std::env::join_paths(&path_entries).map_err(|e| format!("组装 PATH 环境变量失败：{e}"))?;
+    cmd.env("PATH", path_env);
+    cmd.env("COREPACK_NPM_REGISTRY", registry_base)
         .env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
         .env("npm_config_registry", registry_base)
         .env("npm_config_update_notifier", "false");
@@ -106,7 +107,25 @@ fn plugin_command(
         cmd.env("npm_config_proxy", &proxy)
             .env("npm_config_https_proxy", &proxy);
     }
-    cmd
+    Ok(cmd)
+}
+
+/// pnpm shim 的文件名（平台单点）。
+fn pnpm_shim_name() -> &'static str {
+    if cfg!(windows) {
+        "pnpm.CMD"
+    } else {
+        "pnpm"
+    }
+}
+
+/// corepack 可执行文件名（平台单点）。
+fn corepack_name() -> &'static str {
+    if cfg!(windows) {
+        "corepack.cmd"
+    } else {
+        "corepack"
+    }
 }
 
 /// 运行一次官方链命令并 drain 双输出流（静默看门狗 600s 纯兜底）。
@@ -309,7 +328,7 @@ pub fn plugin_add(
             &instance.profile,
             &["add", trimmed],
             registry_base,
-        );
+        )?;
         match run_plugin_command(cmd, &format!("dsh plugin add {trimmed}"), progress, control) {
             Ok(()) => break,
             Err(e) => attempts.push(format!("[通道 {registry_base}] {e}")),
@@ -453,7 +472,7 @@ pub fn plugin_remove(instance_id: &str, package: &str, progress: &mut dyn FnMut(
             &instance.profile,
             &["remove", package],
             registry_base,
-        );
+        )?;
         match run_plugin_command(cmd, &format!("dsh plugin remove {package}"), progress, None) {
             Ok(()) => break,
             Err(e) => attempts.push(format!("[通道 {registry_base}] {e}")),

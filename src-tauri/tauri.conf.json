@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "dsh-launcher",
+  "productName": "DSH 启动器",
+  "mainBinaryName": "dsh-launcher",
   "version": "0.1.0",
   "identifier": "com.mltz.dshlauncher",
   "build": {
@@ -32,13 +33,28 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "category": "DeveloperTool",
+    "publisher": "imccyu",
+    "shortDescription": "DeepSeek Harness（DSH）的图形化启动器",
+    "longDescription": "DSH 启动器是 DeepSeek Harness 的图形化外壳：网页端之外的下载、实例隔离、模型厂商、插件市场、技能中心与整合包搬运，全程图形界面，不修改 DSH 本体。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "allowDowngrades": true,
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
+    }
   }
 }

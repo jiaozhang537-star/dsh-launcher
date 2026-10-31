@@ -3,6 +3,15 @@
   box-sizing: border-box;
 }
 
+/* HTML hidden 语义全局恢复（批次④坑，2026-10-24 根治）：任何类选择器的显式
+   display（.btn/.settings-row/.settings-actions 等均为 flex）都会压过 UA 对
+   [hidden] 的 display:none——源码归档卡三钮全露的根因。此前逐类配套
+   （.launch-btn[hidden] 等，批次③）保留不删；本条以 !important 根治此类坑，
+   新代码只需设 hidden 属性即可。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #app {
@@ -55,6 +64,10 @@ button {
 }
 
 /* 品牌字标位（FormMain ShapeTitleLogo：白、宽39、Margin 19,15.5,0,15.5） */
+.topbar__brand--hidden {
+  display: none; /* FR-27 标题栏「无」态（PCL UiLogoType=0） */
+}
+
 .topbar__brand {
   align-self: center;
   margin-left: 19px;
@@ -1989,21 +2002,29 @@ button {
   word-break: break-all;
 }
 
+/* 左栏行动钮（添加/导入）：MyButton 蓝皮肤（spec §8.2）——CB2 描边、字随边，
+   hover CB3 描边 + CB7 浅蓝底（入 fast / 出 norm），按下 CB6（同栏列表叠层语言），
+   禁用 = 边字 gray4（§4.1），不做半透明淡出。需求方 2026-10-24：灰描边近白
+   显「没完成」，改蓝。 */
 .sub-left__action {
-  border: 1px solid var(--color-bg-page-alt);
-  border-radius: 6px;
+  border: 1px solid var(--cb2);
+  border-radius: var(--radius-list);
   background: var(--white);
-  color: var(--color-text-secondary);
+  color: var(--cb2);
   font-family: inherit;
   font-size: var(--font-size-sm);
   text-align: left;
   padding: 8px 10px;
   cursor: pointer;
+  transition: border-color var(--anim-norm) var(--ease-out),
+    background-color var(--anim-norm) var(--ease-out),
+    color var(--anim-norm) var(--ease-out);
 }
 
 .sub-left__action:disabled {
   cursor: default;
-  opacity: 0.6;
+  border-color: var(--gray4);
+  color: var(--gray4);
 }
 
 /* （以下 hover/空态原存于回归段，2026-09-25 S3 合并重复定义时迁回） */
@@ -2014,11 +2035,18 @@ button {
 }
 
 .sub-left__action:hover {
-  background: var(--cb8);
+  border-color: var(--cb3);
+  background: var(--cb7);
+  transition-duration: var(--anim-fast);
+}
+
+.sub-left__action:active {
+  background: var(--cb6);
 }
 
 .sub-left__action:disabled:hover {
-  background: transparent;
+  border-color: var(--gray4);
+  background: var(--white);
 }
 
 .sub-right {
@@ -2039,6 +2067,30 @@ button {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* —— 版本设置页页头实例标识（spec §8.2 登记：热键页卡头名字语言MyCard 推导）——
+   P4 挂账「无提示换实例」收口：页内此前无「正在配置哪个版本」的可见标识。 */
+.sub-right__subject {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+.sub-right__subject-label {
+  font-size: var(--fs-body);
+  color: var(--gray3);
+}
+
+.sub-right__subject-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--cb1);
 }
 
 .sub-right__content > .settings-status {
@@ -2640,6 +2692,10 @@ button {
 }
 
 .launch-loading__body {
+  /* 需求方 2026-10-24 终稿：鲸鱼+字幕+进度**整组常规流居中**——鲸鱼自然落在
+     组顶（比几何中心高几格、位置固定），字幕在其下、进度再下；空区上下均分，
+     谁也不盖谁。绝对定位钉位置的方案全线废弃（只锚上沿不管下沿，长文案折行
+     后字幕窗下探，反复压进度条/取消钮——「覆盖这覆盖那」的根因）。 */
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -2684,6 +2740,10 @@ button {
 /* 画面：三条同形同长等距波浪线（竖排、密集），鲸鱼浮在水面线上；
    潜水时沉到中/深两条线之下——所以鲸鱼夹在「水面线」与「中/深线」之间。 */
 .launch-loading__scene {
+  /* 定位上下文：scene 自身是常规流子项（参与整组居中，2026-10-24 终稿），
+     但内部的鲸鱼（--whale-track）与三条波浪（--wave）是 absolute 动画元素，
+     依赖 scene 作定位锚——上一刀废弃绝对定位时误删此处 position，导致它们
+     逃逸到页面层（鲸鱼掉底、波浪全宽，2026-10-24 晚需求方截图报障）。 */
   position: relative;
   width: 180px;
   height: 118px;
@@ -2923,42 +2983,59 @@ button {
   text-align: right;
 }
 
-/* ===== 字幕式校验序列（需求方 2026-09-10：这里不是终端，给用户当人看）=====
-   一行 = 一个真实阶段或真实结论，从下往上滚：窗口固定高度、overflow 裁切、
-   顶部渐隐遮罩；track 由 JS 平移（translateY）到「最后一行贴住窗口底」的位置，
-   位移交给 CSS 过渡——观感就是字幕上滚，而不是日志刷屏。 */
+/* ===== 字幕式校验序列（需求方 2026-10-24 定稿：固定三行窗口）=====
+   字幕紧随鲸鱼画面（常规流，间隙由 body 的 gap 管）：恒 3 条——最新在下
+   （小字）、上一条居中（放大）、上上条置顶（小字）；第 4 条出现整体上移一行、
+   最旧一条出窗。原「贴底 240px 大窗 + 顶部渐隐」与「绝对定位钉鲸鱼下沿」
+   两版均已废弃（后者长文案折行后下探压进度/取消钮）。 */
 .launch-loading__roll {
-  position: relative;
-  flex: 1 1 auto;
   width: 100%;
-  min-height: 56px;
-  /* 上限按「一屏能读几行」定：加载页可用高度约 533px，画面 118 + 进度 20 + 间距
-     之后还剩约 340px，取 240px 让长文案折行时也能同时看到 6 行左右（实测 168px
-     只露 4~5 行——这一屏是给人读的，行数优先）。 */
-  max-height: 240px;
-  overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
 }
 
 .launch-loading__track {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   width: 100%;
-  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1); /* S6：0.26s 特殊曲线待统一 */
+}
+
+/* 入列动画：重渲染时整体从下一行高度上滑一格（新行进、旧行升、最旧出窗）。
+   由 JS 重触发（is-entering + reflow），无累计位移。 */
+.launch-loading__track.is-entering {
+  animation: launch-steps-enter 0.24s var(--ease-out);
+}
+
+@keyframes launch-steps-enter {
+  from {
+    transform: translateY(1.55em);
+  }
+
+  to {
+    transform: translateY(0);
+  }
 }
 
 .launch-loading__step {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  /* 正文够大够深：浅灰 11px 小字是这一屏原先最大的毛病（读不清 + 像终端日志）。
-     14px（= 本仓 --font-size-md）是这一栏（260px 宽）里读起来最像字幕、又还能
-     一屏看清六行的大小。 */
   color: var(--color-text);
   font-size: var(--font-size-md);
   line-height: 1.45;
+}
+
+/* 三行窗口的位置档位：中间（焦点，上一条）大而深；上下两条小而次。 */
+.launch-loading__step--cur {
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--cb1);
+}
+
+.launch-loading__step--old,
+.launch-loading__step--new {
+  font-size: var(--fs-body);
+  color: var(--color-text-secondary);
+  opacity: 0.85;
 }
 
 .launch-loading__step-text {
@@ -3726,4 +3803,88 @@ button {
 .tasks__right,
 .collapse-group__list {
   scrollbar-gutter: stable;
+}
+
+/* ===== 个性化（FR-27，P7.5）：背景图层 + 滑杆 =====
+   PCL 口径（PageSetupUI.xaml:104-157）：背景图自身带不透明度（默认 10%）铺在
+   内容之下；有背景时各内容面改半透明白让背景透出，无背景时全局零变化。 */
+#bg-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-position: center;
+  background-size: cover;
+  pointer-events: none;
+}
+
+/* 内容面提层（定位元素默认盖过 z-0 的背景层；topbar 已有 position:relative） */
+.app-main {
+  position: relative;
+}
+
+/* 有背景时：主要内容面半透明白（PCL SemiTransparent 语言），卡片保持白底。 */
+body.has-bg .app-main,
+body.has-bg .sub-left,
+body.has-bg .dl-left,
+body.has-bg .sub-right,
+body.has-bg .dl-right {
+  background: color-mix(in srgb, var(--white) 88%, transparent);
+}
+
+/* 滑杆（PCL MySlider 推导：细轨 + 圆点拇指，色板 cb 系）。填充段由 JS 按
+   百分比画 linear-gradient（纯 CSS 无法只填充轨道左段）。 */
+.pcl-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pcl-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--slider-fill, var(--cb7));
+}
+
+.pcl-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 999px;
+  border: 2px solid var(--white);
+  background: var(--cb3);
+  box-shadow: var(--shadow-card);
+  transition: transform var(--anim-fast) var(--ease-out);
+}
+
+.pcl-slider:active::-webkit-slider-thumb {
+  transform: scale(0.92);
+}
+
+.pcl-slider:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 功能隐藏矩阵 / 设置行内成组控件的对位（PCL CardSwitch 网格语言的轻量版） */
+.settings-switch-grid {
+  display: grid;
+  grid-template-columns: 96px repeat(4, minmax(96px, 1fr));
+  gap: 6px 14px;
+  align-items: center;
+}
+
+.settings-switch-grid .settings-switch-group {
+  grid-column: 1;
+  color: var(--gray3);
+  font-size: var(--fs-info);
+}
+
+.settings-switch-grid .pcl-check {
+  justify-self: start;
 }

@@ -343,7 +343,7 @@ export const downloadsPage: PageDefinition = {
         latestCard.append(row);
       }
       if (latestEntries.length === 0) {
-        latestCard.append(el("p", { class: "settings-status" }, ["registry 上没有可用版本"]));
+        latestCard.append(el("p", { class: "settings-status" }, ["软件源上没有可用版本"]));
       }
       rightContent.append(latestCard);
 

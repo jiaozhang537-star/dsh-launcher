@@ -16,9 +16,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::instances;
 use crate::paths;
+
+/// inject.json / inject-default.json 读-改-写的进程内互斥（对抗审查 R2 P2-03）：
+/// `llm_bridge::sync_instance` 的「读模板 → 改路由 → 写回」与设置页保存并发时，
+/// 无锁会让后写者拿旧快照覆盖新保存（丢更新）。与 instances 的 REGISTRY_LOCK
+/// 无嵌套（inject 侧对实例注册表只做无锁读 get_instance），无死锁面。
+/// **非重入**——持锁期间必须调 `_locked` 内核，不得再进持锁公开壳。
+static INJECT_IO_LOCK: Mutex<()> = Mutex::new(());
+
+/// 取 inject 文件 IO 锁。crate 内复用（llm_bridge 的读-改-写链）。
+pub(crate) fn inject_io_lock() -> MutexGuard<'static, ()> {
+    INJECT_IO_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// 一份可注入配置（默认模板与实例覆盖共用此结构）。
 /// IPC 键为 camelCase（前端 services/instances.ts 同名视图）——2026-09-20
@@ -52,15 +67,23 @@ pub fn is_bootstrap_only(name: &str) -> bool {
         || BOOTSTRAP_PREFIXES.iter().any(|p| upper.starts_with(p))
 }
 
-/// 校验 env 名单：空名或 bootstrap-only 名返回 Err。
+/// 校验 env 名单：空名或 bootstrap-only 名返回 Err；值含换行同样拒绝
+/// （对抗审查 R2 P2-06）：.env 是 KEY=VALUE 逐行格式，值里的换行会让
+/// 「\nEVIL=1」成为独立变量行——若夹带 bootstrap-only 名，DSH fail loud
+/// 拒绝启动，而 UI 报错不会指向真正的肇因（一个换行）。
 pub fn validate_env(env: &BTreeMap<String, String>) -> Result<(), String> {
-    for name in env.keys() {
+    for (name, value) in env {
         if name.trim().is_empty() {
             return Err("环境变量名不能为空白".into());
         }
         if is_bootstrap_only(name) {
             return Err(format!(
                 "{name} 是 DSH 的 bootstrap-only 变量，只能由启动器进程环境注入，不能写入 .env"
+            ));
+        }
+        if value.contains('\n') || value.contains('\r') {
+            return Err(format!(
+                "环境变量 {name} 的值包含换行——.env 按行解析，多行值会破坏格式；请去掉换行或改用进程环境注入"
             ));
         }
     }
@@ -128,6 +151,13 @@ pub fn get_default_template() -> Result<InjectConfig, String> {
 
 /// 写全局默认模板（先校验 env 名单）。
 pub fn set_default_template(config: &InjectConfig) -> Result<(), String> {
+    let _guard = inject_io_lock();
+    set_default_template_locked(config)
+}
+
+/// [`set_default_template`] 的无锁内核：供已持 [`INJECT_IO_LOCK`] 的
+/// 读-改-写链（llm_bridge::sync_instance）复用，避免重入死锁。
+pub(crate) fn set_default_template_locked(config: &InjectConfig) -> Result<(), String> {
     validate_env(&config.env)?;
     write_inject_file(inject_default_file()?, config)
 }
@@ -141,6 +171,12 @@ pub fn get_override(id: &str) -> Result<InjectConfig, String> {
 /// 写实例覆盖（先校验 env 名单；实例必须已存在）。保存后**立即物化**
 /// AGENTS.md（DSH 每轮对话重读该文件，运行中实例下一条消息即生效）。
 pub fn set_override(id: &str, config: &InjectConfig) -> Result<(), String> {
+    let _guard = inject_io_lock();
+    set_override_locked(id, config)
+}
+
+/// [`set_override`] 的无锁内核：同 [`set_default_template_locked`]。
+pub(crate) fn set_override_locked(id: &str, config: &InjectConfig) -> Result<(), String> {
     instances::get_instance(id)?;
     validate_env(&config.env)?;
     write_inject_file(instance_inject_file(id)?, config)?;
@@ -356,6 +392,24 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("MY_APP_FLAG".to_string(), "1".to_string());
         assert!(validate_env(&env).is_ok());
+    }
+
+    /// 值含换行拒绝（对抗审查 R2 P2-06）：换行会让夹带的 KEY=VALUE 成为独立
+    /// 变量行，破坏 .env 结构；报错必须点名肇因变量。
+    #[test]
+    fn env_values_with_newline_are_rejected_by_name() {
+        let mut env = BTreeMap::new();
+        env.insert("MY_VAR".to_string(), "line1\nEVIL=1".to_string());
+        let err = validate_env(&env).unwrap_err();
+        assert!(err.contains("MY_VAR"), "报错必须点名变量：{err}");
+
+        let mut env = BTreeMap::new();
+        env.insert("MY_VAR".to_string(), "line1\r\nline2".to_string());
+        assert!(validate_env(&env).is_err(), "\\r\\n 同样拒绝");
+
+        let mut env = BTreeMap::new();
+        env.insert("OK_VAR".to_string(), "plain value with spaces=#not-comment".to_string());
+        assert!(validate_env(&env).is_ok(), "无换行的普通值放行");
     }
 
     #[test]

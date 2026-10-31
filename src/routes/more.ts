@@ -3,6 +3,7 @@
  *  检查更新 = FR-13（GitHub Releases，经统一下载网关；更新下载进统一任务队列）。 */
 import { el } from "../lib/dom";
 import type { PageDefinition } from "../router";
+import { isMoreCatHidden, type MoreCatId } from "../lib/uiPrefs";
 import { terminalFailure, updateTask, upsertTask } from "../lib/downloadTasks";
 import { checkUpdate, downloadUpdate, installUpdate, type UpdateStatus } from "../services/selfUpdate";
 
@@ -78,7 +79,7 @@ function renderUpdate(): HTMLElement {
     notesBox.replaceChildren();
     actionRow.replaceChildren();
     if (!result.configured) {
-      status.textContent = "未配置更新源——启动器正式发布后可用（更新源在 config.json 的 update_repo）。";
+      status.textContent = "未配置更新源——启动器正式发布后可用。";
       return;
     }
     if (!result.hasUpdate) {
@@ -173,6 +174,10 @@ export const morePage: PageDefinition = {
     // 左栏分类记忆：跨页面重挂载保留（同下载页/设置页先例，2026-10-04 走查修复）。
     let category = lastMoreCategory ?? "about";
     let version = APP_VERSION;
+    // 功能隐藏（FR-27）：被隐藏的分类不进左栏；记忆的分类被藏时回落第一个可见。
+    if (isMoreCatHidden(category as MoreCatId)) {
+      category = CATEGORIES.find((c) => !isMoreCatHidden(c.id as MoreCatId))?.id ?? "about";
+    }
 
     const leftNav = el("div", { class: "sub-left__group" }, []);
     const pane = el("div", { class: "settings-pane" }, []);
@@ -190,6 +195,7 @@ export const morePage: PageDefinition = {
       leftNav.replaceChildren();
       leftNav.append(el("div", { class: "sub-left__label" }, ["更多"]));
       for (const item of CATEGORIES) {
+        if (isMoreCatHidden(item.id as MoreCatId)) continue;
         leftNav.append(
           el(
             "button",

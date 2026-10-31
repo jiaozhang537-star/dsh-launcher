@@ -149,7 +149,11 @@ pub(crate) fn resolve_port(
         // 重启路径：调用方刚刚停掉占用该端口的旧进程，端口可能还处于 TIME_WAIT
         // （bind 探测会失败），但监听已释放——DSH 侧（libuv 带 SO_REUSEADDR）
         // 仍能绑上。此时强行钉定原端口，避免重启导致入口地址漂移。
-        Some(p) if force_pinned && !taken.contains(&p) => Ok((p, false)),
+        // TIME_WAIT 不接受连接（connect 必败），所以「仍在监听」即真被占用——
+        // 对抗审查 R2 P2-04：等待窗口内被第三方抢占时不得硬钉，改走重锚定。
+        Some(p) if force_pinned && !taken.contains(&p) && !crate::process::port_listening(p) => {
+            Ok((p, false))
+        }
         Some(p) if !taken.contains(&p) && port_free(p) => Ok((p, false)),
         other => {
             let start = other.unwrap_or(PORT_BASE).max(PORT_BASE);
@@ -732,6 +736,28 @@ fn to_base36(mut v: u64) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+/// 实例是否正在运行（删除守卫，对抗审查 R1 P1-04）。
+/// 测试构建支持注入「运行中」——运行表表项持有真实子进程句柄，单测无法伪造。
+fn instance_running(id: &str) -> Result<bool, String> {
+    #[cfg(test)]
+    if TEST_RUNNING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|s| s == id)
+    {
+        return Ok(true);
+    }
+    crate::process::process_state(id).map(|s| s.running)
+}
+
+#[cfg(test)]
+static TEST_RUNNING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// 测试注入：模拟「目录被占用导致 rename 失败」（回滚路径的确定性单测用）。
+#[cfg(test)]
+static TEST_RENAME_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 删除实例：注册表先行（前端即时可见），目录物理清除交给分离的系统进程。
 ///
 /// 大体积实例（数百 MB、数万文件）同步删除要数秒，前端会像卡死；且若用户
@@ -746,18 +772,24 @@ fn to_base36(mut v: u64) -> String {
 ///    不再静默半删（旧路径：注册表已摘、rd 失败被丢弃、留幽灵目录）；
 /// 3. **失败可重试**——清扫上次遗留的隔离目录（启动后首次枚举 + 每次删除），
 ///    清除失败不再无人知晓，下次启动自动补刀。
+///
+/// 4. **运行中拒删 + 失败回滚**（对抗审查 R1 P1-04）——注册表内实例先查进程
+///    状态，运行中 fail loud；rename 失败（进程/杀毒占用目录）时回滚注册表行，
+///    实例卡片不得凭空消失。
 pub fn delete_instance(id: &str) -> Result<(), String> {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut registry = load_registry()?;
-    // 外部实例（原地引用）：仅解除关联，绝不动用户文件夹。
-    let external_dir = registry
-        .instances
-        .iter()
-        .find(|i| i.id == id)
-        .and_then(|i| i.dir.clone());
+    let removed = registry.instances.iter().find(|i| i.id == id).cloned();
+    // 运行中拒绝删除（对抗审查 R1 P1-04）：注册表必须与磁盘同进退——旧行为
+    // 「先摘行再 rename」，rename 失败（进程占用目录在 Windows 上必然发生）
+    // 后实例卡片凭空消失，运行中进程从此不可见不可停。不在册的残留目录没有
+    // 进程身份，不做此检查、走下方既有清理路径。
+    if removed.is_some() && instance_running(id)? {
+        return Err("实例正在运行——请先停止后再删除".into());
+    }
     registry.instances.retain(|i| i.id != id);
     save_registry(&registry)?;
-    if external_dir.is_some() {
+    if removed.as_ref().map(|i| i.dir.is_some()).unwrap_or(false) {
         purge_stale_quarantines()?;
         return Ok(());
     }
@@ -771,11 +803,29 @@ pub fn delete_instance(id: &str) -> Result<(), String> {
     }
     if dir.exists() {
         let quarantine = quarantine_dir(id)?;
-        std::fs::rename(&dir, &quarantine).map_err(|e| {
-            format!(
-                "实例目录暂时无法删除（可能正在运行或被其他程序占用）：{e} —— 请先停止该实例后重试"
-            )
-        })?;
+        let rename_result = {
+            #[cfg(test)]
+            if TEST_RENAME_FAILS.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("实例目录暂时无法删除（测试模拟占用）——请先停止该实例后重试".to_string())
+            } else {
+                std::fs::rename(&dir, &quarantine).map_err(|e| {
+                    format!("实例目录暂时无法删除（可能正在运行或被其他程序占用）：{e} —— 请先停止该实例后重试")
+                })
+            }
+            #[cfg(not(test))]
+            std::fs::rename(&dir, &quarantine).map_err(|e| {
+                format!("实例目录暂时无法删除（可能正在运行或被其他程序占用）：{e} —— 请先停止该实例后重试")
+            })
+        };
+        if let Err(e) = rename_result {
+            // rename 失败必须回滚注册表行（对抗审查 R1 P1-04）：删除失败时
+            // 实例仍要可见、可重试，不能只报一次错就让它从 UI 上蒸发。
+            if let Some(inst) = removed {
+                registry.instances.push(inst);
+                save_registry(&registry)?;
+            }
+            return Err(e);
+        }
         spawn_detached_purge(&quarantine);
     }
     purge_stale_quarantines()?;
@@ -1056,6 +1106,46 @@ pub(crate) mod tests {
     fn delete_missing_instance_is_error_free_and_idempotent() {
         let (_lock, tmp) = sandbox("idem");
         delete_instance("i-nothing").unwrap(); // 目录与注册表都没有 → 幂等成功
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 对抗审查 R1 P1-04：运行中实例拒删，注册表行不得被摘除。
+    #[test]
+    fn delete_running_instance_is_rejected_and_registry_intact() {
+        let (_lock, tmp) = sandbox("del-running");
+        let inst = create_instance("运行中", "web").unwrap();
+        TEST_RUNNING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(inst.id.clone());
+        let err = delete_instance(&inst.id).unwrap_err();
+        assert!(err.contains("正在运行"), "实际报错：{err}");
+        assert!(
+            load_registry().unwrap().instances.iter().any(|i| i.id == inst.id),
+            "注册表行不得被摘除"
+        );
+        TEST_RUNNING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|s| s != &inst.id);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 对抗审查 R1 P1-04：rename 失败（目录被占用）时注册表行必须回滚，
+    /// 回滚后守卫复位重试可走通。
+    #[test]
+    fn delete_rename_failure_rolls_back_registry() {
+        let (_lock, tmp) = sandbox("del-rollback");
+        let inst = create_instance("占用", "web").unwrap();
+        TEST_RENAME_FAILS.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = delete_instance(&inst.id).unwrap_err();
+        assert!(err.contains("无法删除"), "实际报错：{err}");
+        assert!(
+            load_registry().unwrap().instances.iter().any(|i| i.id == inst.id),
+            "rename 失败后注册表行必须回滚"
+        );
+        TEST_RENAME_FAILS.store(false, std::sync::atomic::Ordering::SeqCst);
+        delete_instance(&inst.id).unwrap();
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -1402,13 +1492,18 @@ pub(crate) mod tests {
         let (got, reanchored) = resolve_port(Some(stolen), &[], false).unwrap();
         assert!(reanchored && got != stolen);
 
-        // 重启路径（force_pinned）：端口仍被占用也钉定原值——调用方刚停掉旧进程，
-        // 残留的 TIME_WAIT 不该让入口地址漂移（DSH 侧 SO_REUSEADDR 能绑上）。
-        assert_eq!(resolve_port(Some(stolen), &[], true).unwrap(), (stolen, false));
+        // 重启路径（force_pinned）：端口**真被监听**时不得硬钉（R2 P2-04）——
+        // 10s 等待窗口内被第三方抢占时，硬钉会让新 DSH 进程绑不上端口。
+        let (got_force, reanchored_force) = resolve_port(Some(stolen), &[], true).unwrap();
+        assert!(reanchored_force && got_force != stolen, "真监听者不得被硬钉绕过");
         // 但别的实例已钉定的端口绝不偷。
         let (other, _) = resolve_port(Some(stolen), &[stolen], true).unwrap();
         assert_ne!(other, stolen);
         drop(stolen_holder);
+
+        // 端口无监听者（TIME_WAIT 场景的替身：bind 可能仍失败，但 connect 不通）
+        // → force_pinned 钉定原值，入口地址不漂移（DSH 侧 SO_REUSEADDR 能绑上）。
+        assert_eq!(resolve_port(Some(free_port), &[], true).unwrap(), (free_port, false));
 
         // 新分配钳制下限；taken 列表被跳过。
         let (fresh, re2) = resolve_port(None, &[], false).unwrap();

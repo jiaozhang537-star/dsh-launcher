@@ -466,6 +466,9 @@ pub fn route_report(instance_id: &str) -> Result<RouteReport, String> {
 /// settings.yaml 由 inject 引擎再生，直改会被下一次再生抹掉）。外来路由
 /// （非启动器管理键）原样保留。幂等：内容不变时也安全重写。
 pub fn sync_instance(instance_id: &str) -> Result<(), String> {
+    // 读-改-写全程持 inject IO 锁（对抗审查 R2 P2-03）：与设置页保存并发时，
+    // 后写者不得拿旧快照覆盖新保存。写入走 `_locked` 内核防重入死锁。
+    let _io_guard = crate::inject::inject_io_lock();
     let instance = crate::instances::get_instance(instance_id)?;
     let existing = existing_providers(instance_id)?;
     let desire = desired_routes(&existing)?;
@@ -500,9 +503,9 @@ pub fn sync_instance(instance_id: &str) -> Result<(), String> {
             .insert("llm-pi-ai".into(), Value::Object(namespace));
     }
     if instance.isolation {
-        crate::inject::set_override(instance_id, &config)?;
+        crate::inject::set_override_locked(instance_id, &config)?;
     } else {
-        crate::inject::set_default_template(&config)?;
+        crate::inject::set_default_template_locked(&config)?;
     }
     crate::inject::write_instance_files(instance_id)?;
     Ok(())

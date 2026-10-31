@@ -31,6 +31,7 @@ pub fn cancelled_error(received: Option<u64>) -> String {
 /// 单任务控制柄：取消立即生效；暂停在下一个检查点（字节流 ≤ 一个读块，
 /// 子进程链 ≤ 一次输出 tick）生效，继续后从同一连接（若服务端未掐断）或
 /// Range 断点（`.part` 仍在时自动重连续传）恢复。
+#[derive(Debug)]
 pub struct TaskControl {
     cancel: AtomicBool,
     paused: AtomicBool,
@@ -92,11 +93,22 @@ fn with_controls<R>(f: impl FnOnce(&mut BTreeMap<String, Arc<TaskControl>>) -> R
     f(guard.get_or_insert_with(BTreeMap::new))
 }
 
-/// 注册任务控制柄（同键覆盖：前端对同键有防重入，此处兜底以最新为准）。
-pub fn register(key: &str) -> Arc<TaskControl> {
+/// 注册任务控制柄；同键在途任务存在时拒绝（对抗审查 R2 P2-02）。
+///
+/// 旧语义「同键覆盖以最新为准」已废弃：覆盖会让旧下载的控制柄成为孤儿
+/// （pause/cancel 只能操作新柄），两条 spawn_blocking 还会并发写同一个
+/// `<temp>/dsh-task-<key>.part` 断点文件互相踩踏。前端本就有防重入，此处的
+/// 拒绝是后端自洽防线——在途 = 注册表中仍有该键（finish 即移除）。
+pub fn register(key: &str) -> Result<Arc<TaskControl>, String> {
     let control = Arc::new(TaskControl::new());
-    with_controls(|m| m.insert(key.to_string(), control.clone()));
-    control
+    with_controls(|m| {
+        if m.contains_key(key) {
+            return Err("已有同名任务在进行——请先等待完成，或在任务页取消后再试".to_string());
+        }
+        m.insert(key.to_string(), control.clone());
+        Ok(())
+    })?;
+    Ok(control)
 }
 
 /// 查控制柄（pause / resume / cancel 命令用）；任务不存在或已结束 → None。
@@ -209,15 +221,22 @@ mod tests {
     /// 注册表：register → lookup 同柄；finish 后 lookup 为 None；
     /// 同键覆盖后旧柄失效（lookup 返回新柄）。
     #[test]
-    fn registry_register_lookup_finish_and_overwrite() {
-        let a = register("test-reg-a");
+    fn registry_register_lookup_finish_and_reject_duplicate() {
+        let a = register("test-reg-a").unwrap();
         assert!(Arc::ptr_eq(&a, &lookup("test-reg-a").unwrap()));
         finish("test-reg-a");
         assert!(lookup("test-reg-a").is_none());
 
-        let b = register("test-reg-b");
-        let _b2 = register("test-reg-b");
-        assert!(!Arc::ptr_eq(&b, &lookup("test-reg-b").unwrap()));
+        let b = register("test-reg-b").unwrap();
+        // 同键在途拒绝（R2 P2-02：旧覆盖语义废弃——孤儿柄 + .part 双写）。
+        let err = register("test-reg-b").unwrap_err();
+        assert!(err.contains("已有同名任务"), "实际报错：{err}");
+        assert!(
+            Arc::ptr_eq(&b, &lookup("test-reg-b").unwrap()),
+            "拒绝时原柄必须保持有效"
+        );
+        finish("test-reg-b");
+        assert!(register("test-reg-b").is_ok(), "结束后同键可重新注册");
         finish("test-reg-b");
     }
 

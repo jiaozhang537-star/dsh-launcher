@@ -13,9 +13,23 @@ import { marketDetailPage } from "./routes/market-detail";
 import { tasksPage } from "./routes/tasks";
 import { mountTaskFab } from "./components/task-fab";
 import { mountRouter, registerPages } from "./router";
+import { applyBackground } from "./lib/background";
+import { isTempShowAll, setTempShowAll } from "./lib/uiPrefs";
 
 // 首帧前套用已保存的自定义主题色（FR-11；无覆盖 = theme.css 静态默认蓝）。
 initTheme();
+
+// 个性化背景（FR-27）：每次启动随机加载 Pictures/ 里的一张（PCL 同款）。
+void applyBackground();
+
+// 功能隐藏的 F12 临时显示（PCL PageSetupUI.xaml:297：任意界面按 F12 暂时
+// 显示被隐藏的功能）。preventDefault 防 WebView2 开 DevTools。
+window.addEventListener("keydown", (event) => {
+  if (event.key === "F12") {
+    event.preventDefault();
+    setTempShowAll(!isTempShowAll());
+  }
+});
 
 registerPages([launchPage, downloadsPage, settingsPage, morePage, instanceSelectPage, instanceSettingsPage, marketDetailPage, tasksPage]);
 
@@ -53,7 +67,7 @@ window.addEventListener("drop", (event) => {
   void (async () => {
     try {
       const [{ invoke }, { openModpackImport }] = await Promise.all([
-        import("@tauri-apps/api/core"),
+        import("./services/tauri"),
         import("./routes/modpack-import"),
       ]);
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -63,6 +77,7 @@ window.addEventListener("drop", (event) => {
       });
       await openModpackImport(stagedPath);
     } catch (err) {
+      // err 已是统一层规范化后的中文友好句（对抗审查 R1 P1-05：不得裸透传原文）。
       showHint(`拖入导入失败：${String(err).slice(0, 240)}`);
     }
   })();

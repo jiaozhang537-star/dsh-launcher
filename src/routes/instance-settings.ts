@@ -1,11 +1,11 @@
 import { collapseArrow, el, pclCheck } from "../lib/dom";
 import { collapseToggle } from "../lib/anim";
+import { showHint } from "../lib/hint";
 import { icon } from "../lib/icons";
 import { getSelectedInstance } from "../lib/selected-instance";
 import type { PageDefinition } from "../router";
 import {
   getInjectOverride,
-  getGlobalAgentsMd,
   instanceSetAdvanced,
   instanceSetIsolation,
   listInstances,
@@ -70,6 +70,9 @@ export const instanceSettingsPage: PageDefinition = {
     // ===== 左栏子导航 =====
     const navButtons = new Map<SectionId, HTMLButtonElement>();
     const rightArea = el("div", { class: "sub-right__content" }, []);
+    // 页头实例标识（对抗审查 R2，P4 挂账「无提示换实例」收口）：本页此前
+    // 无任何「正在配置哪个版本」的可见标识（概览首卡 2026-09-20 裁决删除后）。
+    const instanceSubject = el("div", { class: "sub-right__subject" }, []);
     // AGENTS.md 防抖计时器提为 render 级：切分区时清除挂起的保存，避免旧
     // 闭包在页面已重绘后照常写盘（写入目标本身正确，状态行已失效）。
     let agentsSaveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -79,11 +82,17 @@ export const instanceSettingsPage: PageDefinition = {
         btn.classList.toggle("sub-nav__item--active", id === section);
       }
       clearTimeout(agentsSaveTimer);
+      instanceSubject.replaceChildren();
       rightArea.replaceChildren();
       if (!currentInstance) {
         rightArea.append(el("p", { class: "settings-status" }, ["未选择实例——请先在「版本选择」页选择。"]));
         return;
       }
+      // 每次渲染都重读选中实例：切换实例返回本页时标识自动刷新。
+      instanceSubject.append(
+        el("span", { class: "sub-right__subject-label" }, ["正在配置"]),
+        el("span", { class: "sub-right__subject-name" }, [currentInstance.name]),
+      );
       if (section === "overview") renderOverview();
       else if (section === "settings") renderSettings();
       else if (section === "plugins") renderPlugins();
@@ -138,19 +147,18 @@ export const instanceSettingsPage: PageDefinition = {
       );
     }
 
-    /** 快捷打开卡（2026-09-12 追加批次）：横排三个按钮直达 skills / 对话 / 源码文件夹。 */
+    /** 快捷打开卡（2026-09-12 追加批次）：横排两个按钮直达 skills / 对话文件夹
+     *  （「打开源码」已删，2026-10-24 需求方指令——源码入口收归源码归档卡；
+     *  点击后的灰字同批删除：成功无文案【文件夹在桌面打开自证】，失败走左下
+     *  轻提示 showHint，卡内无常驻/点击灰字行）。 */
     function renderQuickOpenCard(inst: Instance): HTMLElement {
-      const status = el("span", { class: "settings-path" }, []);
-      const makeBtn = (label: string, which: "skills" | "sessions" | "sources"): HTMLElement => {
+      const makeBtn = (label: string, which: "skills" | "sessions"): HTMLElement => {
         const btn = el("button", { type: "button", class: "btn btn--line" }, [label]);
         btn.addEventListener("click", () => {
           btn.disabled = true;
           void openInstanceSubdir(inst.id, which)
-            .then(() => {
-              status.textContent = `已打开 ${label.replace(/^打开/, "")}文件夹。`;
-            })
             .catch((err) => {
-              status.textContent = String(err).slice(0, 240);
+              showHint(`打开失败：${String(err).slice(0, 200)}`);
             })
             .finally(() => {
               btn.disabled = false;
@@ -163,20 +171,19 @@ export const instanceSettingsPage: PageDefinition = {
         el("div", { class: "settings-actions" }, [
           makeBtn("打开skills", "skills"),
           makeBtn("打开对话", "sessions"),
-          makeBtn("打开源码", "sources"),
         ]),
-        status,
       ]);
     }
 
-    /** 源码归档卡片（FR-22 修订）：为该版本补下载官方源码到 `versions/<id>/sources/`。 */
+    /** 源码归档卡片（FR-22 修订）：为该版本补下载官方源码到 `versions/<id>/sources/`。
+     *  三态（需求方 2026-10-24）：无源码 = 只显示「下载源码」；下载中 = 按钮文字
+     *  带进度；已下载 = 「下载源码」隐藏、「打开源码目录/删除源码」出现。
+     *  状态灰字全删——进度与结果走按钮文字，status 仅承载错误与「本体未装」
+     *  禁用原因（错误反馈不可省，成功态废话不可留）。 */
     function renderSourcesCard(inst: Instance): HTMLElement {
-      // 静止时无说明文字；仅两处功能性状态：本体未装（按钮禁用原因）与运行时回执。
       const status = el("span", { class: "settings-path" }, [
         inst.dshVersion ? "" : "该版本尚未安装 DSH 本体——先到「下载」页安装，再下载源码。",
       ]);
-      const actions = el("div", { class: "settings-actions" }, []);
-      let downloaded = false;
 
       const openBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["打开源码目录"]);
       openBtn.hidden = true;
@@ -210,12 +217,8 @@ export const instanceSettingsPage: PageDefinition = {
         delBtn.disabled = true;
         void deleteInstanceSources(inst.id)
           .then(() => {
-            downloaded = false;
-            openBtn.hidden = true;
-            delBtn.hidden = true;
-            btn.disabled = !inst.dshVersion;
-            btn.textContent = "下载源码";
-            status.textContent = "源码归档已删除。";
+            setMissing();
+            status.textContent = "";
           })
           .catch((err) => {
             status.textContent = `删除失败：${String(err).slice(0, 240)}`;
@@ -227,45 +230,51 @@ export const instanceSettingsPage: PageDefinition = {
 
       const btn = el("button", { type: "button", class: "btn btn--line" }, ["下载源码"]);
       btn.disabled = !inst.dshVersion;
-      // 状态回显（走查反馈②）：已下载过就直接呈现「已下载 + 打开/删除」，
-      // 不再要点一次下载才知道。
+
+      // 两个稳定态 + 下载中的过渡态。downloading 防竞态：初始「已下载」查询
+      // 晚于用户点下载返回时，不得把下载中的界面错切成已下载态。
+      let downloading = false;
+      const setDownloaded = (): void => {
+        downloading = false;
+        btn.hidden = true;
+        openBtn.hidden = false;
+        delBtn.hidden = false;
+      };
+      const setMissing = (): void => {
+        btn.hidden = false;
+        btn.disabled = !inst.dshVersion;
+        btn.textContent = "下载源码";
+        openBtn.hidden = true;
+        delBtn.hidden = true;
+      };
+
       void instanceSourcesDownloaded(inst.id)
         .then((downloadedAlready) => {
-          if (!downloadedAlready || downloaded) return;
-          downloaded = true;
-          btn.disabled = true;
-          btn.textContent = "已下载";
-          openBtn.hidden = false;
-          delBtn.hidden = false;
-          status.textContent = "源码归档已在本版本 sources/ 目录，可打开查看。";
+          if (downloadedAlready && !downloading) setDownloaded();
         })
         .catch(() => {});
       btn.addEventListener("click", () => {
-        if (!inst.dshVersion || btn.disabled) return;
+        if (!inst.dshVersion || btn.disabled || downloading) return;
+        downloading = true;
         btn.disabled = true;
         openBtn.hidden = true;
         delBtn.hidden = true;
-        status.textContent = "准备下载源码归档…";
+        status.textContent = "";
         void downloadSourceArchive(inst.dshVersion, inst.id, ({ received, total }) => {
           if (total > 0) {
-            status.textContent = `下载源码归档 ${Math.min(100, Math.round((received / total) * 100))}% · ${received} / ${total} 字节`;
+            btn.textContent = `下载中 ${Math.min(100, Math.round((received / total) * 100))}%`;
           }
         })
-          .then(() => {
-            downloaded = true;
-            status.textContent = "源码归档已就位（本版本 sources/ 目录，可打开查看）";
-            openBtn.hidden = false;
-            delBtn.hidden = false;
-          })
+          .then(setDownloaded)
           .catch((err) => {
+            downloading = false;
+            btn.textContent = "重试下载";
             status.textContent = `下载失败：${String(err).slice(0, 260)}`;
           })
           .finally(() => {
-            btn.disabled = downloaded;
-            btn.textContent = downloaded ? "已下载" : "重试下载";
+            if (!btn.hidden) btn.disabled = !inst.dshVersion;
           });
       });
-      actions.append(btn, openBtn, delBtn);
       return el("section", { class: "card settings-card" }, [
         el("h2", { class: "card__title" }, ["源码归档"]),
         el("div", { class: "settings-node-card" }, [btn, openBtn, delBtn, status]),
@@ -284,13 +293,15 @@ export const instanceSettingsPage: PageDefinition = {
       const agentsArea = document.createElement("textarea");
       agentsArea.className = "settings-textarea";
       agentsArea.rows = 8;
-      agentsArea.placeholder = "为这个版本单独填写指令；留空 = 恢复继承全局默认";
-      const agentsStatus = el("p", { class: "settings-path" }, ["加载中…"]);
+      // 需求方 2026-10-24 定稿占位符（含与设置页 AGENTS.md 的优先级关系）；
+      // 状态灰字只留错误反馈，成功与继承态说明全删（占位符已承载语义）。
+      agentsArea.placeholder =
+        "该版本的全局系统指令，优先级大于设置页AGENTS.md，只生效一个";
+      const agentsStatus = el("p", { class: "settings-path" }, [""]);
       let agentsLoaded = false;
       agentsArea.addEventListener("input", () => {
         if (!agentsLoaded) return;
         clearTimeout(agentsSaveTimer);
-        agentsStatus.textContent = "正在保存…";
         agentsSaveTimer = setTimeout(() => {
           void (async () => {
             try {
@@ -301,10 +312,6 @@ export const instanceSettingsPage: PageDefinition = {
                 env: over.env ?? {},
                 agentsMd: text.trim() === "" ? null : text,
               });
-              agentsStatus.textContent =
-                text.trim() === ""
-                  ? "已恢复继承全局默认——已即时物化到本版本。"
-                  : "已保存并即时物化——运行中实例下一条消息起生效（该版本只用自己的内容，全局对它不再生效）。";
             } catch (err) {
               agentsStatus.textContent = `保存失败：${String(err).slice(0, 240)}`;
             }
@@ -313,18 +320,12 @@ export const instanceSettingsPage: PageDefinition = {
       });
       async function loadAgentsState(): Promise<void> {
         try {
-          const [over, global] = await Promise.all([getInjectOverride(inst.id), getGlobalAgentsMd()]);
+          const over = await getInjectOverride(inst.id);
           const own = over.agentsMd ?? null;
           // 输入框只显示实例自己的覆盖，不得回填全局内容：回填会把「继承全局」
           // 伪装成实例设置——删除后重进输入框又出现全局文字，读作「删了又回来」
-          // （2026-10-03 需求方报障「AGENTS 是假的」）。继承态 = 空框 + 状态行说明。
+          // （2026-10-03 需求方报障「AGENTS 是假的」）。
           agentsArea.value = own ?? "";
-          agentsStatus.textContent =
-            own != null
-              ? "当前：实例独立内容——覆盖全局（非叠加）；修改即保存并即时物化。"
-              : global
-                ? "当前：未单独设置——启动时按全局 AGENTS.md 写入本版本（全局内容见 设置 > 配置）；在此输入即转为本版本独立内容。"
-                : "当前：全局与实例均未设置。";
         } catch (err) {
           agentsStatus.textContent = `读取失败：${String(err).slice(0, 240)}`;
         } finally {
@@ -410,7 +411,6 @@ export const instanceSettingsPage: PageDefinition = {
       rightArea.append(
         el("section", { class: "card settings-card" }, [
           el("h2", { class: "card__title" }, ["AGENTS.md"]),
-          el("p", { class: "settings-path" }, ["未单独设置时使用全局 AGENTS.md；局部设置覆盖全局。"]),
           agentsArea,
           agentsStatus,
         ]),
@@ -608,7 +608,7 @@ export const instanceSettingsPage: PageDefinition = {
             const self = list.plugins.filter((p) => p.group === "selfmade").map(rowAll);
             listArea.replaceChildren();
             if (list.plugins.length === 0) {
-              setStatus("该实例还没有已装插件——到「下载 · 插件」市场逛逛吧。");
+              setStatus("该实例还没有已装插件。");
               return;
             }
             setStatus(
@@ -805,7 +805,7 @@ export const instanceSettingsPage: PageDefinition = {
     return el("section", { class: "page" }, [
       el("div", { class: "sub sub--compact" }, [
         el("aside", { class: "sub-left" }, [nav]),
-        el("section", { class: "sub-right" }, [rightArea]),
+        el("section", { class: "sub-right" }, [instanceSubject, rightArea]),
       ]),
     ]);
   },

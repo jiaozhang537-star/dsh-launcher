@@ -1,8 +1,25 @@
-/** 设置页：左分类（模型提供商 / 配置 / 热键）+ 右内容卡片，全局左右栏布局。 */
-import { el, pclCheck } from "../lib/dom";
+/** 设置页：左分类（模型提供商 / 配置 / 个性化 / 热键）+ 右内容卡片，全局左右栏布局。 */
+import { el, pclCheck, pclRadio } from "../lib/dom";
 import { icon } from "../lib/icons";
 import type { PageDefinition } from "../router";
 import { DSH_SHORTCUTS, DSH_SHORTCUT_SECTIONS } from "../lib/dsh-hotkeys";
+import {
+  isSettingsCatHidden,
+  isTempShowAll,
+  loadUiPrefs,
+  updateUiPrefs,
+  UI_PREFS_EVENT,
+  type MoreCatId,
+  type SettingsCatId,
+  type TitlebarMode,
+} from "../lib/uiPrefs";
+import { applyBackground, clearBackgroundLayer, setBackgroundOpacity } from "../lib/background";
+import {
+  clearBackground,
+  clearLogo,
+  openBackgroundFolder,
+  setLogoFromFile,
+} from "../services/personalize";
 import {
   cancelDownload,
   detectSystemNode,
@@ -1133,36 +1150,25 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
   const agentsArea = document.createElement("textarea");
   agentsArea.className = "settings-textarea";
   agentsArea.rows = 8;
-  agentsArea.placeholder = "对所有版本生效的全局指令；留空 = 清除";
-  const agentsStatus = el("p", { class: "settings-path" }, ["加载中…"]);
+  agentsArea.placeholder = "所有版本共享的系统指令";
+  // 需求方 2026-10-24：状态灰字只留错误反馈（保存/读取失败），成功与说明句全删。
+  const agentsStatus = el("p", { class: "settings-path" }, [""]);
   let agentsLoaded = false;
   let agentsTimer: ReturnType<typeof setTimeout> | undefined;
   agentsArea.addEventListener("input", () => {
     if (!agentsLoaded) return;
     clearTimeout(agentsTimer);
-    agentsStatus.textContent = "正在保存…";
     agentsTimer = setTimeout(() => {
       const text = agentsArea.value;
-      void setGlobalAgentsMd(text.trim() === "" ? null : text)
-        .then(() => {
-          agentsStatus.textContent =
-            text.trim() === ""
-              ? "已清除——已从未自设的版本移除 AGENTS.md。"
-              : "已保存——对所有版本即时生效（运行中实例下一条消息起读取新内容）。";
-        })
-        .catch((err) => {
-          agentsStatus.textContent = `保存失败：${String(err).slice(0, 240)}`;
-        });
+      void setGlobalAgentsMd(text.trim() === "" ? null : text).catch((err) => {
+        agentsStatus.textContent = `保存失败：${String(err).slice(0, 240)}`;
+      });
     }, 600);
   });
   void (async () => {
     try {
       const global = await getGlobalAgentsMd();
       agentsArea.value = global ?? "";
-      agentsStatus.textContent =
-        global == null
-          ? "当前未设置。对所有版本共享生效。"
-          : "已设置——修改即自动保存，对全部版本的下次启动生效。";
     } catch (err) {
       agentsStatus.textContent = `读取失败：${String(err).slice(0, 240)}`;
     } finally {
@@ -1171,8 +1177,7 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
   })();
   pane.append(
     el("section", { class: "card settings-card" }, [
-      el("h2", { class: "card__title" }, ["全局 AGENTS.md"]),
-      el("p", { class: "settings-path" }, ["对所有版本共享生效；单个版本可在版本设置覆盖。"]),
+      el("h2", { class: "card__title" }, ["AGENTS.md"]),
       agentsArea,
       agentsStatus,
     ]),
@@ -1203,60 +1208,7 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
     ]),
   );
 
-  // 主题色（FR-11）：PCL ModSecret 同式派生——选色即整套色板联动；
-  // 未选自定义主题时保持 phase-05 对齐的静态默认蓝。
-  const themeStatus = el("p", { class: "settings-status" }, [""]);
-  let currentTheme: ThemeColor | null = loadTheme();
-  const swatches = el("div", { class: "theme-swatches" }, []);
-  const syncSwatches = (): void => {
-    swatches.replaceChildren(
-      ...PRESET_HUES.map((hue) => {
-        const color = deriveThemeTokens({ hue, sat: 85 })["--cb3"];
-        const active = currentTheme?.hue === hue;
-        const swatch = el("button", {
-          type: "button",
-          class: `theme-swatch${active ? " theme-swatch--on" : ""}`,
-          style: `background:${color}`,
-          title: `主题色 ${hue}°`,
-          "aria-label": `主题色 ${hue}°`,
-        });
-        swatch.addEventListener("click", () => {
-          currentTheme = { hue, sat: 85 };
-          saveTheme(currentTheme);
-          syncSwatches();
-          themeStatus.textContent = "已切换主题色。";
-        });
-        return swatch;
-      }),
-    );
-  };
-  syncSwatches();
-  const themeInput = el("input", { type: "color", class: "settings-input theme-input", value: "#1370f3" });
-  themeInput.addEventListener("input", () => {
-    const picked = themeInput.value;
-    // 自选色：取其色相与饱和度，明度沿用 PCL 分档（派生公式固定）。
-    const hsl = hexToHsl(picked);
-    if (!hsl) return;
-    currentTheme = { hue: Math.round(hsl.h), sat: Math.max(40, Math.min(100, hsl.s)) };
-    saveTheme(currentTheme);
-    syncSwatches();
-    themeStatus.textContent = `已切换主题色：${picked}`;
-  });
-  const themeReset = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["恢复默认"]);
-  themeReset.addEventListener("click", () => {
-    clearThemeOverride();
-    currentTheme = null;
-    syncSwatches();
-    themeStatus.textContent = "已恢复默认蓝主题。";
-  });
-  pane.append(
-    el("section", { class: "card settings-card" }, [
-      el("h2", { class: "card__title" }, ["主题色"]),
-      swatches,
-      el("div", { class: "settings-row" }, [themeInput, themeReset]),
-      themeStatus,
-    ]),
-  );
+  // 主题色卡已迁「个性化」分类（2026-10-24，FR-27——PCL 个性化含主题）。
 
   // 下载并发（FR-09 队列额度 / FR-11）。
   const concSelect = el("select", { class: "settings-input" }, []);
@@ -1338,79 +1290,301 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
   const communitySection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, ["加载中…"])]);
   pane.append(communitySection);
   await renderCommunityMirrorPanel(communitySection);
-
-  // GitHub Token（FR-03 配额提额；DPAPI 加密落凭据库）
-  const tokenSection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, ["加载中…"])]);
-  pane.append(tokenSection);
-  await renderGithubTokenPanel(tokenSection);
+  // GitHub Token 提额面板已删（2026-10-24 需求方指令「市场提额删了，不需要用到」）
+  // —— GitHub 请求回到匿名配额，后端 github_token 注入一并移除。
 }
 
-/** GitHub Token 面板（市场/Skill 聚合 API 提额，匿名 60 次/小时 → 配置后大幅提升）。 */
-async function renderGithubTokenPanel(card: HTMLElement): Promise<void> {
-  card.replaceChildren(el("h2", { class: "card__title" }, ["GitHub Token（市场提额）"]));
-  let status: KeyvaultStatus;
-  try {
-    status = await getStatus();
-  } catch (err) {
-    card.append(el("p", { class: "settings-status settings-status--error" }, [String(err)]));
-    return;
-  }
-  const statusLine = el("p", { class: "settings-status" }, [""]);
-  const tokenInput = el("input", {
-    type: "password",
-    class: "settings-input",
-    placeholder: status.githubTokenConfigured ? KEY_MASK : "ghp_…（可选，加密落盘，不明文回读）",
+// ===== 个性化（FR-27，P7.5；PCL PageSetupUI.xaml 同构）=====
+
+/** 个性化 = 主题 + 背景 + 标题栏 + 功能隐藏（PCL 设置·个性化页四卡同构；
+ *  背景音乐 / 主页自定义不在需求方口径内，不做）。 */
+function renderPersonalizePane(pane: HTMLElement): void {
+  pane.replaceChildren();
+  appendThemeCard(pane);
+  appendBackgroundCard(pane);
+  appendTitlebarCard(pane);
+  appendSwitchCard(pane);
+}
+
+/** 主题色卡（FR-11；2026-10-24 自「配置」迁入——PCL 个性化含主题）。 */
+function appendThemeCard(pane: HTMLElement): void {
+  const themeStatus = el("p", { class: "settings-status" }, [""]);
+  let currentTheme: ThemeColor | null = loadTheme();
+  const swatches = el("div", { class: "theme-swatches" }, []);
+  const syncSwatches = (): void => {
+    swatches.replaceChildren(
+      ...PRESET_HUES.map((hue) => {
+        const color = deriveThemeTokens({ hue, sat: 85 })["--cb3"];
+        const active = currentTheme?.hue === hue;
+        const swatch = el("button", {
+          type: "button",
+          class: `theme-swatch${active ? " theme-swatch--on" : ""}`,
+          style: `background:${color}`,
+          title: `主题色 ${hue}°`,
+          "aria-label": `主题色 ${hue}°`,
+        });
+        swatch.addEventListener("click", () => {
+          currentTheme = { hue, sat: 85 };
+          saveTheme(currentTheme);
+          syncSwatches();
+          themeStatus.textContent = "已切换主题色。";
+        });
+        return swatch;
+      }),
+    );
+  };
+  syncSwatches();
+  const themeInput = el("input", { type: "color", class: "settings-input theme-input", value: "#1370f3" });
+  themeInput.addEventListener("input", () => {
+    const picked = themeInput.value;
+    // 自选色：取其色相与饱和度，明度沿用 PCL 分档（派生公式固定）。
+    const hsl = hexToHsl(picked);
+    if (!hsl) return;
+    currentTheme = { hue: Math.round(hsl.h), sat: Math.max(40, Math.min(100, hsl.s)) };
+    saveTheme(currentTheme);
+    syncSwatches();
+    themeStatus.textContent = `已切换主题色：${picked}`;
+  });
+  const themeReset = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["恢复默认"]);
+  themeReset.addEventListener("click", () => {
+    clearThemeOverride();
+    currentTheme = null;
+    syncSwatches();
+    themeStatus.textContent = "已恢复默认蓝主题。";
+  });
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["主题色"]),
+      swatches,
+      el("div", { class: "settings-row" }, [themeInput, themeReset]),
+      themeStatus,
+    ]),
+  );
+}
+
+/** 背景图片卡（PCL CardBackground，PageSetupUI.xaml:104-157）：不透明度滑杆 +
+ *  打开文件夹（图片自行放入，每次启动随机加载一张）/ 刷新背景图片 / 清空背景图片。 */
+function appendBackgroundCard(pane: HTMLElement): void {
+  const status = el("p", { class: "settings-status" }, [""]); // 仅错误反馈
+  const slider = el("input", {
+    type: "range",
+    class: "pcl-slider",
+    min: "0",
+    max: "100",
+    step: "1",
+    "aria-label": "背景不透明度",
   }) as HTMLInputElement;
-  if (status.githubTokenConfigured) tokenInput.value = KEY_MASK;
-  const saveBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["保存 Token"]);
-  saveBtn.addEventListener("click", () => {
-    void (async () => {
-      const value = tokenInput.value.trim();
-      if (value === KEY_MASK || value === "") {
-        statusLine.textContent = "未修改";
-        statusLine.classList.remove("settings-status--error");
-        return;
-      }
-      saveBtn.disabled = true;
-      try {
-        await setKey("github", value);
-        tokenInput.value = KEY_MASK;
-        statusLine.textContent = "Token 已加密保存（市场与 Skill 目录的 API 配额即刻提升）";
-        statusLine.classList.remove("settings-status--error");
-      } catch (err) {
-        statusLine.textContent = `保存失败：${String(err)}`;
-        statusLine.classList.add("settings-status--error");
-      } finally {
-        saveBtn.disabled = false;
-      }
-    })();
+  slider.value = String(loadUiPrefs().backgroundOpacity);
+  const paint = (): void => {
+    const pct = Number(slider.value);
+    slider.style.setProperty(
+      "--slider-fill",
+      `linear-gradient(to right, var(--cb3) ${pct}%, var(--cb7) ${pct}%)`,
+    );
+  };
+  paint();
+  slider.addEventListener("input", () => {
+    paint();
+    setBackgroundOpacity(Number(slider.value)); // 实时预览，不落盘
   });
-  const clearBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["清除"]);
-  if (!status.githubTokenConfigured) {
-    clearBtn.disabled = true;
-    clearBtn.title = status.githubTokenEnvAuto ? "Token 来自环境变量，无法在此清除" : "尚无已存 Token";
-  }
+  slider.addEventListener("change", () => {
+    updateUiPrefs((p) => {
+      p.backgroundOpacity = Number(slider.value);
+    });
+  });
+
+  const openBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn", title: "将背景图片放到该文件夹，启动器会在每次打开时随机加载其中的一张" }, ["打开文件夹"]);
+  openBtn.addEventListener("click", () => {
+    void openBackgroundFolder().catch((err) => {
+      status.textContent = `打开失败：${String(err).slice(0, 200)}`;
+    });
+  });
+  const refreshBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn", title: "随机加载文件夹内的一张背景图片" }, ["刷新背景图片"]);
+  refreshBtn.addEventListener("click", () => {
+    status.textContent = "";
+    void applyBackground().catch(() => {
+      status.textContent = "刷新背景失败。";
+    });
+  });
+  const clearBtn = el("button", { type: "button", class: "btn btn--danger settings-inline-btn" }, ["清空背景图片"]);
   clearBtn.addEventListener("click", () => {
+    status.textContent = "";
+    void clearBackground()
+      .then(() => {
+        clearBackgroundLayer();
+      })
+      .catch((err) => {
+        status.textContent = `清空失败：${String(err).slice(0, 200)}`;
+      });
+  });
+
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["背景图片"]),
+      el("div", { class: "settings-row" }, [el("span", { class: "settings-path" }, ["不透明度"]), slider]),
+      el("div", { class: "settings-actions" }, [openBtn, refreshBtn, clearBtn]),
+      status,
+    ]),
+  );
+}
+
+/** 标题栏卡（PCL CardLogo，PageSetupUI.xaml:186-219）：无 / 默认 / 文本 / 图片
+ *  四态；文本态出标题栏文本输入框（≤100 字），图片态出更改 / 清空图片。 */
+function appendTitlebarCard(pane: HTMLElement): void {
+  const status = el("p", { class: "settings-status" }, [""]); // 仅错误反馈
+  const prefs = loadUiPrefs();
+
+  const modeRow = el("div", { class: "settings-actions" }, []);
+  const radios: { mode: TitlebarMode; label: string }[] = [
+    { mode: "none", label: "无" },
+    { mode: "default", label: "默认" },
+    { mode: "text", label: "文本" },
+    { mode: "image", label: "图片" },
+  ];
+  let currentMode: TitlebarMode = prefs.titlebar.mode;
+  for (const { mode, label } of radios) {
+    const radio = pclRadio({ name: "dsh-titlebar-mode", value: mode, label, checked: mode === currentMode });
+    radio.input.addEventListener("change", () => {
+      currentMode = mode;
+      updateUiPrefs((p) => {
+        p.titlebar.mode = mode;
+      });
+      syncRows();
+    });
+    modeRow.append(radio.root);
+  }
+
+  const textInput = el("input", {
+    type: "text",
+    class: "settings-input",
+    maxlength: "100",
+    placeholder: "标题栏文本",
+  }) as HTMLInputElement;
+  textInput.value = prefs.titlebar.text;
+  let textTimer: ReturnType<typeof setTimeout> | undefined;
+  textInput.addEventListener("input", () => {
+    clearTimeout(textTimer);
+    textTimer = setTimeout(() => {
+      updateUiPrefs((p) => {
+        p.titlebar.text = textInput.value;
+      });
+    }, 400);
+  });
+
+  const changeImgBtn = el("button", { type: "button", class: "btn btn--line settings-inline-btn" }, ["更改图片"]);
+  changeImgBtn.addEventListener("click", () => {
+    status.textContent = "";
     void (async () => {
-      clearBtn.disabled = true;
       try {
-        await clearKey("github");
-        tokenInput.value = "";
-        tokenInput.placeholder = "ghp_…（可选，加密落盘，不明文回读）";
-        statusLine.textContent = "已清除";
-        statusLine.classList.remove("settings-status--error");
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({
+          multiple: false,
+          filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"] }],
+        });
+        if (typeof picked !== "string") return; // 取消
+        await setLogoFromFile(picked);
+        window.dispatchEvent(new CustomEvent(UI_PREFS_EVENT)); // topbar 刷新图片缓存
       } catch (err) {
-        statusLine.textContent = `清除失败：${String(err)}`;
-        statusLine.classList.add("settings-status--error");
-      } finally {
-        clearBtn.disabled = false;
+        status.textContent = `设置失败：${String(err).slice(0, 200)}`;
       }
     })();
   });
-  card.append(
-    el("p", { class: "settings-path" }, ["未配置时以匿名配额运行；配置后提升额度。"]),
-    el("div", { class: "settings-row" }, [tokenInput, saveBtn, clearBtn]),
-    statusLine,
+  const clearImgBtn = el("button", { type: "button", class: "btn btn--danger settings-inline-btn" }, ["清空图片"]);
+  clearImgBtn.addEventListener("click", () => {
+    status.textContent = "";
+    void clearLogo()
+      .then(() => {
+        window.dispatchEvent(new CustomEvent(UI_PREFS_EVENT));
+      })
+      .catch((err) => {
+        status.textContent = `清空失败：${String(err).slice(0, 200)}`;
+      });
+  });
+  const textRow = el("div", { class: "settings-row" }, [textInput]);
+  const imageRow = el("div", { class: "settings-actions" }, [changeImgBtn, clearImgBtn]);
+  const syncRows = (): void => {
+    textRow.hidden = currentMode !== "text";
+    imageRow.hidden = currentMode !== "image";
+  };
+  syncRows();
+
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["标题栏"]),
+      modeRow,
+      textRow,
+      imageRow,
+      status,
+    ]),
+  );
+}
+
+/** 功能隐藏卡（PCL CardSwitch，PageSetupUI.xaml:295-339）：勾选隐藏页面/功能；
+ *  说明句为 F12 机制的功能性说明（PCL 原文）。 */
+function appendSwitchCard(pane: HTMLElement): void {
+  if (loadUiPrefs().hidden.hideSwitchCard && !isTempShowAll()) return; // 「功能隐藏」自身被隐藏（设置依然有效）
+  const grid = el("div", { class: "settings-switch-grid" }, []);
+  const group = (label: string): HTMLElement =>
+    el("span", { class: "settings-switch-group" }, [label]);
+  const toggleIn = (list: string[], id: string, on: boolean): void => {
+    const idx = list.indexOf(id);
+    if (on && idx === -1) list.push(id);
+    if (!on && idx !== -1) list.splice(idx, 1);
+  };
+  const check = (label: string, checked: boolean, onChange: (on: boolean) => void, title?: string): HTMLElement => {
+    const box = pclCheck({ label, checked, title });
+    box.input.addEventListener("change", () => onChange(box.input.checked));
+    return box.root;
+  };
+  const hidden = loadUiPrefs().hidden;
+  const pageCheck = (id: string, label: string): HTMLElement =>
+    check(label, hidden.pages.includes(id), (on) => {
+      updateUiPrefs((p) => toggleIn(p.hidden.pages, id, on));
+    });
+  const catCheck = (id: SettingsCatId, label: string): HTMLElement =>
+    check(label, hidden.settingsCats.includes(id), (on) => {
+      updateUiPrefs((p) => toggleIn(p.hidden.settingsCats as string[], id, on));
+    });
+  const moreCheck = (id: MoreCatId, label: string): HTMLElement =>
+    check(label, hidden.moreCats.includes(id), (on) => {
+      updateUiPrefs((p) => toggleIn(p.hidden.moreCats as string[], id, on));
+    });
+
+  grid.append(
+    group("主页面"),
+    pageCheck("downloads", "下载"),
+    pageCheck("settings", "设置"),
+    pageCheck("more", "更多"),
+    group("设置 子页面"),
+    catCheck("providers", "模型提供商"),
+    catCheck("config", "配置"),
+    catCheck("personalize", "个性化"),
+    catCheck("hotkeys", "热键"),
+    group("更多 子页面"),
+    moreCheck("about", "关于"),
+    moreCheck("help", "使用帮助"),
+    moreCheck("update", "检查更新"),
+    group("特定功能"),
+    check("版本管理", hidden.versionButtons, (on) => {
+      updateUiPrefs((p) => {
+        p.hidden.versionButtons = on;
+      });
+    }, "隐藏启动按钮下方的版本选择与版本设置入口。"),
+    check("功能隐藏", hidden.hideSwitchCard, (on) => {
+      updateUiPrefs((p) => {
+        p.hidden.hideSwitchCard = on;
+      });
+    }, "仅隐藏本选项卡，设置的禁用内容依然有效。"),
+  );
+
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["功能隐藏"]),
+      el("p", { class: "settings-path" }, [
+        "你可以隐藏不需要的页面或关闭特定功能。在任意界面按 F12 可以暂时显示被隐藏的功能。",
+      ]),
+      grid,
+    ]),
   );
 }
 
@@ -1461,23 +1635,31 @@ function renderComboKeys(keys: string[]): (Node | string)[] {
 
 // ===== 页面壳 =====
 
-type SettingsCategory = "providers" | "config" | "hotkeys";
+type SettingsCategory = "providers" | "config" | "hotkeys" | "personalize";
 
 /** 左栏分类记忆：跨页面重挂载保留（同下载页 lastDlCategory 先例，2026-10-04 走查修复——
  *  闭包局部变量会在 启动页↔设置 往返时把分类重置回模型提供商）。 */
 let lastSettingsCategory: SettingsCategory = "providers";
+
+/** 页面级监听清理（功能隐藏：勾选会即时改左栏，切页时移除监听防累积）。 */
+let cleanupSettingsListener: (() => void) | null = null;
 
 export const settingsPage: PageDefinition = {
   id: "settings",
   navLabel: "设置",
   render: () => {
     type Category = SettingsCategory;
-    let category: Category = lastSettingsCategory;
     const categories: { id: Category; label: string }[] = [
       { id: "providers", label: "模型提供商" },
       { id: "config", label: "配置" },
+      { id: "personalize", label: "个性化" },
       { id: "hotkeys", label: "热键" },
     ];
+    let category: Category = lastSettingsCategory;
+    // 功能隐藏（FR-27）：被隐藏的分类不进左栏；记忆的分类被藏时回落第一个可见。
+    if (isSettingsCatHidden(category)) {
+      category = categories.find((c) => !isSettingsCatHidden(c.id))?.id ?? "providers";
+    }
 
     const leftNav = el("div", { class: "sub-left__group" }, []);
     leftNav.append(el("div", { class: "sub-left__label" }, ["设置"]));
@@ -1488,6 +1670,8 @@ export const settingsPage: PageDefinition = {
         void renderProvidersPane(pane);
       } else if (category === "config") {
         void renderConfigPane(pane);
+      } else if (category === "personalize") {
+        renderPersonalizePane(pane);
       } else {
         renderHotkeysPane(pane);
       }
@@ -1496,6 +1680,7 @@ export const settingsPage: PageDefinition = {
       leftNav.replaceChildren();
       leftNav.append(el("div", { class: "sub-left__label" }, ["设置"]));
       for (const item of categories) {
+        if (isSettingsCatHidden(item.id)) continue;
         leftNav.append(
           el(
             "button",
@@ -1520,11 +1705,38 @@ export const settingsPage: PageDefinition = {
     renderLeft();
     renderRight();
 
+    // 偏好变更（功能隐藏勾选 / F12）：左栏即时过滤；当前分类被藏 → 自动切走；
+    // 「功能隐藏自身」开关变化 → 重画右栏让本卡消失/回归。
+    const hiddenSig = (): string => {
+      const h = loadUiPrefs().hidden;
+      return JSON.stringify([h.settingsCats, h.hideSwitchCard]);
+    };
+    let lastSig = hiddenSig();
+    const onPrefs = (): void => {
+      renderLeft();
+      if (isSettingsCatHidden(category)) {
+        category = categories.find((c) => !isSettingsCatHidden(c.id))?.id ?? "providers";
+        lastSettingsCategory = category;
+        renderRight();
+        return;
+      }
+      if (hiddenSig() !== lastSig) {
+        lastSig = hiddenSig();
+        renderRight();
+      }
+    };
+    window.addEventListener(UI_PREFS_EVENT, onPrefs);
+    cleanupSettingsListener = () => window.removeEventListener(UI_PREFS_EVENT, onPrefs);
+
     return el("section", { class: "page" }, [
       el("div", { class: "sub sub--compact" }, [
         el("aside", { class: "sub-left" }, [leftNav]),
         el("section", { class: "sub-right" }, [pane]),
       ]),
     ]);
+  },
+  unmount: () => {
+    cleanupSettingsListener?.();
+    cleanupSettingsListener = null;
   },
 };

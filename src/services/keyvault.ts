@@ -17,10 +17,6 @@ export interface VendorKeyStatus {
 
 export interface KeyvaultStatus {
   vendors: VendorKeyStatus[];
-  /** 保险库里已存 GitHub Token（市场/Skill 聚合提额用；不是模型厂商）。 */
-  githubTokenConfigured?: boolean;
-  /** 环境变量 GH_TOKEN / GITHUB_TOKEN 自动可用。 */
-  githubTokenEnvAuto?: boolean;
 }
 
 /** 内置默认模型（镜像 dsh-llm-deepseek DEFAULT_MODELS id），仅作设置页默认勾选项。 */

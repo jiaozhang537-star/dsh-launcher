@@ -13,7 +13,6 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::gateway;
-use crate::keyvault;
 use crate::market_cache::{self, EtagEntry};
 use crate::mirror_config;
 
@@ -25,24 +24,8 @@ pub struct FetchOutcome {
     pub body: serde_json::Value,
 }
 
-/// 解析 GitHub Token：保险库优先，其次环境变量 GH_TOKEN / GITHUB_TOKEN。
-pub fn github_token() -> Option<String> {
-    if let Ok(token) = keyvault::reveal_key_for(keyvault::VENDOR_GITHUB) {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(token) = std::env::var(name) {
-            let trimmed = token.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
+// GitHub Token 提额已删（2026-10-24 需求方指令「市场提额删了，不需要用到」）：
+// 全部请求回到匿名配额，不再读保险库/环境变量注入 Authorization。
 
 /// GET 一个 GitHub API 端点并解析 JSON。`path` 形如 `/search/repositories`，
 /// `query` 为已编码的查询串（可为空）。阻塞网络调用——command 侧放
@@ -65,9 +48,6 @@ pub fn api_get_json(path: &str, query: &str) -> Result<FetchOutcome, String> {
         .get(&url)
         .set("User-Agent", "dsh-launcher")
         .set("Accept", "application/vnd.github+json");
-    if let Some(token) = github_token() {
-        request = request.set("Authorization", &format!("Bearer {token}"));
-    }
     if let Some(entry) = &cached {
         if !entry.etag.is_empty() {
             request = request.set("If-None-Match", &entry.etag);
@@ -325,16 +305,5 @@ mod tests {
         assert!(repo_tags("a/b/c").is_err(), "多级路径");
         assert!(repo_tags("a/b c").is_err(), "含空格");
         assert!(repo_tags("a/").is_err(), "空段");
-    }
-
-    #[test]
-    fn token_prefers_vault_then_env() {
-        // 环境兜底路径可观测（保险库无记录时）。
-        std::env::set_var("GH_TOKEN", "env-token");
-        std::env::remove_var("GITHUB_TOKEN");
-        // 保险库多半没有 github 记录；无论有无，env 顺序断言只在 vault 未命中时成立，
-        // 因此这里只断言「取到的是非空串」，并把 env 清理干净。
-        let _ = github_token();
-        std::env::remove_var("GH_TOKEN");
     }
 }

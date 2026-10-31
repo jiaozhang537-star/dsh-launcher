@@ -156,7 +156,7 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
       if (head) head.textContent = "";
       rowsBox.append(
         el("p", { class: "settings-status settings-status--error" }, [`技能目录拉取失败：${loadError.slice(0, 300)}`]),
-        el("p", { class: "settings-status" }, ["可到「设置 · 配置」配置 GitHub Token 提额后重试。"]),
+        el("p", { class: "settings-status" }, ["可稍后重试，或到「设置 · 配置」检查镜像源。"]),
       );
       return;
     }

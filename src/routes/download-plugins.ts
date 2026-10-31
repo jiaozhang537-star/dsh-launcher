@@ -159,7 +159,7 @@ export function renderMarketSection(container: HTMLElement): HTMLElement {
         el("p", { class: "settings-status settings-status--error" }, [
           `市场拉取失败：${loadError.slice(0, 300)}`,
         ]),
-        el("p", { class: "settings-status" }, ["可到「设置 · 配置」检查镜像源或配置 GitHub Token 提额后重试。"]),
+        el("p", { class: "settings-status" }, ["可到「设置 · 配置」检查镜像源后重试。"]),
       );
       return;
     }

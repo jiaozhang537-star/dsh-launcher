@@ -25,9 +25,9 @@ const KEYVAULT_FILE: &str = "keyvault.json";
 pub const VENDOR_DEEPSEEK: &str = "deepseek";
 pub const VENDOR_OPENAI: &str = "openai";
 
-/// GitHub 个人访问令牌（市场/Skill 聚合 API 提额用，FR-03）。复用保险库
-/// DPAPI 存储与读写链，但**不是模型厂商**：status 视图与启动注入一律跳过，
-/// 前端经由 VaultStatus 的 githubToken 字段感知其存在。
+/// GitHub 个人访问令牌的历史遗留通道（提额功能已删，2026-10-24 需求方指令）。
+/// 保留此标记仅为了**过滤存量条目**：老版本保险库里可能存有 vendor="github"
+/// 的记录，status 视图与启动注入一律跳过它，也不允许新写入。
 pub const VENDOR_GITHUB: &str = "github";
 
 /// DeepSeek 默认模型目录（镜像 dsh-llm-deepseek 的 DEFAULT_MODELS id）；
@@ -78,7 +78,6 @@ pub fn vendor_env_name(vendor: &str) -> Option<&'static str> {
         "kimi-coding" => Some("KIMI_API_KEY"),
         "fireworks" => Some("FIREWORKS_API_KEY"),
         "vercel-ai-gateway" => Some("AI_GATEWAY_API_KEY"),
-        VENDOR_GITHUB => Some("GH_TOKEN"),
         _ => None,
     }
 }
@@ -161,10 +160,6 @@ pub struct VendorStatus {
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
     pub vendors: Vec<VendorStatus>,
-    /// 保险库里已存 GitHub Token（市场聚合提额用）。
-    pub github_token_configured: bool,
-    /// 环境变量 GH_TOKEN / GITHUB_TOKEN 里已有 Token（自动配置通道）。
-    pub github_token_env_auto: bool,
 }
 
 #[cfg(windows)]
@@ -371,13 +366,12 @@ fn default_vault() -> Vault {
     }
 }
 
-/// 厂商合法性：GitHub Token 通道 ∪ 自定义提供方 ∪ 内置目录全部 id——
-/// 与 providers-catalog 同口径（R5 修复：此前只放行 deepseek/openai，
-/// 目录里其余厂商的启用/存 Key/模型/地址全被误拒，前端勾选必然回弹）。
+/// 厂商合法性：自定义提供方 ∪ 内置目录全部 id——与 providers-catalog
+/// 同口径（R5 修复：此前只放行 deepseek/openai，目录里其余厂商的启用/存
+/// Key/模型/地址全被误拒，前端勾选必然回弹）。GitHub 提额通道删除后
+/// （2026-10-24）github 不再是合法写入对象，存量条目只被读取侧过滤。
 fn valid_vendor(vendor: &str) -> bool {
-    vendor == VENDOR_GITHUB
-        || crate::providers::is_custom_id(vendor)
-        || crate::providers::catalog_entry(vendor).is_some()
+    crate::providers::is_custom_id(vendor) || crate::providers::catalog_entry(vendor).is_some()
 }
 
 /// 取厂商条目，不存在则按默认建档（deepseek 预填内置模型，其余空）。
@@ -478,11 +472,7 @@ pub fn clear_key(vendor: &str) -> Result<(), String> {
 
 /// 把厂商从保险库整条移除（启用态/Key/模型列表/地址一并清除）——
 /// 「按需添加」列表的移除入口（R5）；幂等（无记录即成功）。
-/// GitHub Token 不属于模型厂商列表，拒绝。
 pub fn forget_vendor(vendor: &str) -> Result<(), String> {
-    if vendor == VENDOR_GITHUB {
-        return Err("GitHub Token 不在模型厂商列表内".into());
-    }
     if !valid_vendor(vendor) {
         return Err(format!("不支持的模型厂商：{vendor:?}"));
     }
@@ -495,28 +485,15 @@ pub fn forget_vendor(vendor: &str) -> Result<(), String> {
     save_vault(&vault)
 }
 
-/// GitHub Token 的环境变量自动配置探测（GH_TOKEN / GITHUB_TOKEN 任一非空）。
-fn github_token_env_auto() -> bool {
-    ["GH_TOKEN", "GITHUB_TOKEN"].iter().any(|name| {
-        std::env::var(name).map(|v| !v.trim().is_empty()).unwrap_or(false)
-    })
-}
-
 /// 只读状态视图（无密钥材料）；环境变量探测在本函数完成，前端不做二套判断。
-/// GitHub Token 不是模型厂商——不出现在 vendors 里，只以两个布尔位呈现。
+/// 历史遗留的 github 条目不是模型厂商——不出现在 vendors 里（提额已删，
+/// 仅作存量过滤）。
 pub fn status() -> Result<VaultStatus, String> {
     let vault = load_vault()?;
-    let mut github_token_configured = false;
     let vendors = vault
         .vendors
         .iter()
-        .filter(|entry| {
-            if entry.vendor == VENDOR_GITHUB {
-                github_token_configured |= entry.ciphertext_b64.is_some();
-                return false;
-            }
-            true
-        })
+        .filter(|entry| entry.vendor != VENDOR_GITHUB)
         .map(|entry| VendorStatus {
             has_key: entry.ciphertext_b64.is_some(),
             env_auto: vendor_env_name(&entry.vendor)
@@ -528,11 +505,7 @@ pub fn status() -> Result<VaultStatus, String> {
             address: entry.address.clone(),
         })
         .collect();
-    Ok(VaultStatus {
-        vendors,
-        github_token_configured,
-        github_token_env_auto: github_token_env_auto(),
-    })
+    Ok(VaultStatus { vendors })
 }
 
 /// 枚举「已启用且已有 Key」厂商的 (厂商, 明文 Key)——拉起实例时逐条注入
@@ -884,7 +857,7 @@ mod tests {
         assert!(reveal_key_for("kimi").is_err(), "Key 随记录一并清除");
 
         forget_vendor("kimi").unwrap(); // 幂等
-        assert!(forget_vendor(VENDOR_GITHUB).is_err(), "github 不在模型厂商列表");
+        assert!(forget_vendor(VENDOR_GITHUB).is_err(), "提额已删，github 不是合法厂商");
         assert!(forget_vendor("unknown-vendor").is_err(), "未知厂商拒绝");
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -996,41 +969,38 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// GitHub Token 复用保险库存储但不污染模型厂商视图：不出现在 vendors、
-    /// 不参与启动注入，仅以 githubToken* 布尔位可见（P3 市场 Token 提额）。
+    /// 提额删除后的 github 遗留语义（2026-10-24）：不允许新写入；存量条目
+    /// （老版本保险库直接构造模拟）不出现在厂商视图、不参与启动注入。
     #[cfg(windows)]
     #[test]
-    fn github_token_is_isolated_from_model_vendors() {
-        let (_lock, tmp) = sandbox("github-token");
-        set_key(VENDOR_GITHUB, "ghp_test1234567890abcdef").unwrap();
-        set_key(VENDOR_DEEPSEEK, "sk-test-1234567890abcdefSECRET").unwrap();
+    fn github_legacy_entries_are_hidden_and_writes_rejected() {
+        let (_lock, tmp) = sandbox("github-legacy");
+        assert!(
+            set_key(VENDOR_GITHUB, "ghp_test1234567890abcdef").is_err(),
+            "提额已删，github 不再是合法写入对象"
+        );
+
+        // 存量条目：直接构造落库（等价老版本 set_key 的产物）。
+        let cipher = base64_encode(&dpapi::protect(b"ghp_test1234567890abcdef").unwrap());
+        let mut vault = load_vault().unwrap();
+        vault.vendors.push(VaultVendor {
+            vendor: VENDOR_GITHUB.into(),
+            enabled: true,
+            ciphertext_b64: Some(cipher),
+            models: vec![],
+            address: None,
+        });
+        save_vault(&vault).unwrap();
 
         let st = status().unwrap();
         assert!(
             st.vendors.iter().all(|v| v.vendor != VENDOR_GITHUB),
-            "github 不得作为厂商卡出现"
+            "遗留 github 条目不得作为厂商卡出现"
         );
-        assert!(st.github_token_configured);
-        assert_eq!(st.vendors.len(), 1, "模型厂商视图不受影响");
-        assert_eq!(st.vendors[0].vendor, VENDOR_DEEPSEEK);
-
-        // 启动注入只取模型厂商：github 条目即使误启用也不进环境注入。
-        set_enabled(VENDOR_GITHUB, true).unwrap();
         assert!(
             reveal_enabled_keys().unwrap().iter().all(|(v, _)| v != VENDOR_GITHUB),
-            "github token 不得注入实例进程环境"
+            "遗留 github 条目即使误启用也不注入实例环境"
         );
-        // reveal_key_for 面向壳侧功能（github 客户端提额）仍可解密。
-        assert_eq!(reveal_key_for(VENDOR_GITHUB).unwrap(), "ghp_test1234567890abcdef");
-
-        // 磁盘无明文。
-        let disk = std::fs::read_to_string(vault_path(&tmp)).unwrap();
-        assert!(!disk.contains("ghp_test1234567890abcdef"));
-
-        clear_key(VENDOR_GITHUB).unwrap();
-        let st = status().unwrap();
-        assert!(!st.github_token_configured);
-        assert_eq!(reveal_key_for(VENDOR_GITHUB).unwrap_err(), "厂商 \"github\" 尚未配置 API Key");
         std::fs::remove_dir_all(&tmp).ok();
     }
 

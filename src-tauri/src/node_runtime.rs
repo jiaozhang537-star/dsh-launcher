@@ -1,8 +1,13 @@
 //! Node.js 运行时代管：系统检测、版本范围校验、便携版下载/解压/注册。
 //!
 //! 范围规则来自 PROJECT FR-05：`^22.19 || >=24`（即 22.19 ≤ v < 23，或 ≥ 24；
-//! 23.x 不合格）。托管便携版落在 `<managed root>/nodes/<semver>/node.exe`，
-//! 多版本共存；全局默认版本记录在 `<managed root>/config.json`。
+//! 23.x 不合格）。托管便携版落在 `<managed root>/nodes/<semver>/<node 可执行
+//! 文件>`，多版本共存；全局默认版本记录在 `<managed root>/config.json`。
+//!
+//! 平台边界（对抗审查 R1 P1-06）：发行包文件名与可执行文件名收敛为
+//! [`node_archive_name`] / [`node_exe_name`] 两个单点，两侧实现均有单测
+//! （参数化 os/arch，Windows 上即可覆盖两个分支）；解压按包格式分派
+//! （Windows zip / 其他平台 tar.gz）。
 
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -13,6 +18,30 @@ use crate::paths;
 
 /// 进度事件名（前端 listen 用）。
 pub const PROGRESS_EVENT: &str = "node-download-progress";
+
+/// Node 可执行文件名（单点）：Windows `node.exe`，其他平台 `node`。
+pub fn node_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    }
+}
+
+/// Node 发行包文件名（单点，参数化 os/arch 使两个分支都能在任一平台被单测）。
+/// Windows 取 zip，其他平台取 tar.gz（nodejs.org 双格式同源发布）。
+/// 未覆盖的平台 fail loud——宁可明确不支持，不可默默下错包。
+pub fn node_archive_name(os: &str, arch: &str, version: (u32, u32, u32)) -> Result<String, String> {
+    let (ma, mi, pa) = version;
+    let (tag, ext) = match (os, arch) {
+        ("windows", "x86_64") => ("win-x64", "zip"),
+        ("linux", "x86_64") => ("linux-x64", "tar.gz"),
+        (os, arch) => {
+            return Err(format!("暂不支持的 Node 发行包平台：{os}/{arch}"));
+        }
+    };
+    Ok(format!("node-v{ma}.{mi}.{pa}-{tag}.{ext}"))
+}
 
 /// 系统 Node 检测结果（IPC 视图；键为 camelCase，与前端 `meetsRange` 对齐）。
 #[derive(Debug, Clone, Serialize)]
@@ -88,14 +117,14 @@ fn run_version_command(_program: &str) -> Option<String> {
     Some(format!("v{ma}.{mi}.{pa}"))
 }
 
-/// 定位 PATH 上的 node.exe（Windows）；找不到返回 None。
+/// 定位 PATH 上的 node 可执行文件；找不到返回 None。
 fn which_node() -> Option<String> {
-    let path_var = std::env::var("PATH").ok()?;
-    for dir in path_var.split(';') {
-        if dir.trim().is_empty() {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = Path::new(dir).join("node.exe");
+        let candidate = dir.join(node_exe_name());
         if candidate.is_file() {
             return Some(candidate.display().to_string());
         }
@@ -132,7 +161,7 @@ pub fn managed_versions() -> Result<Vec<String>, String> {
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if parse_node_version(&name).is_some() && entry.path().join("node.exe").is_file() {
+        if parse_node_version(&name).is_some() && entry.path().join(node_exe_name()).is_file() {
             versions.push(name);
         }
     }
@@ -148,7 +177,7 @@ pub fn managed_node_exe(version: &str) -> Option<PathBuf> {
     if parse_node_version(version).is_none() {
         return None;
     }
-    let exe = paths::nodes_dir().ok()?.join(version).join("node.exe");
+    let exe = paths::nodes_dir().ok()?.join(version).join(node_exe_name());
     exe.is_file().then_some(exe)
 }
 
@@ -275,7 +304,7 @@ pub fn ensure_default_node(
     })?;
     set_default_version(candidate)?;
     drop(guard);
-    Ok(dir.join("node.exe"))
+    Ok(dir.join(node_exe_name()))
 }
 
 /// 字节数的紧凑展示（进度文案用）：0 B / 512 KB / 12.3 MB / 1.2 GB。
@@ -295,7 +324,8 @@ pub(crate) fn fmt_size(bytes: u64) -> String {
 
 /// 从 SHASUMS256.txt 内容里取目标文件的哈希（行格式 `<sha256>  <文件名>`，
 /// 二进制形态为 `<sha256> *<文件名>`）；找不到返回 None。
-fn shasums_hash_for(text: &str, archive_name: &str) -> Option<String> {
+/// crate 内复用（Node 发行包、自更新安装包共用同一校验口径——R1 P1-01）。
+pub(crate) fn shasums_hash_for(text: &str, archive_name: &str) -> Option<String> {
     for line in text.lines() {
         let mut parts = line.splitn(2, ' ');
         let hash = parts.next().unwrap_or("").trim();
@@ -346,8 +376,8 @@ fn expected_sha256(version_triple: &str, archive_name: &str, dist_bases: &[&str]
     ))
 }
 
-/// 本地文件 sha256（hex 小写）。
-fn file_sha256(path: &Path) -> Result<String, String> {
+/// 本地文件 sha256（hex 小写）。crate 内复用（Node 发行包、自更新安装包）。
+pub(crate) fn file_sha256(path: &Path) -> Result<String, String> {
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("打开 {} 失败：{e}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -374,7 +404,8 @@ pub fn download_and_install(
 ) -> Result<PathBuf, String> {
     let (ma, mi, pa) =
         parse_node_version(version).ok_or_else(|| format!("非法版本号：{version:?}"))?;
-    let archive_name = format!("node-v{ma}.{mi}.{pa}-win-x64.zip");
+    let archive_name =
+        node_archive_name(std::env::consts::OS, std::env::consts::ARCH, (ma, mi, pa))?;
     if dist_bases.is_empty() {
         return Err("下载网关未提供任何 Node 发行包通道".into());
     }
@@ -396,7 +427,7 @@ pub fn download_and_install(
                     );
                     continue;
                 }
-                match extract_zip(&zip_path, version) {
+                match extract_archive(&zip_path, version, &archive_name) {
                     Ok(dir) => {
                         let _ = std::fs::remove_file(&zip_path);
                         return Ok(dir);
@@ -550,6 +581,16 @@ pub(crate) fn try_download(
     Ok(part_path.to_path_buf())
 }
 
+/// 解压分派（R1 P1-06）：按发行包格式走对应实现；两端都剥压缩包首层目录
+/// （node-vX-*/）并落到 nodes/<version>/，产物校验共用。
+fn extract_archive(archive_path: &Path, version: &str, archive_name: &str) -> Result<PathBuf, String> {
+    if archive_name.ends_with(".zip") {
+        extract_zip(archive_path, version)
+    } else {
+        extract_tar_gz(archive_path, version)
+    }
+}
+
 /// 解压 zip 到 nodes/<version>/，剥掉压缩包首层目录（node-vX-win-x64/）。
 fn extract_zip(zip_path: &Path, version: &str) -> Result<PathBuf, String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("打开 zip 失败：{e}"))?;
@@ -585,10 +626,65 @@ fn extract_zip(zip_path: &Path, version: &str) -> Result<PathBuf, String> {
         std::io::copy(&mut entry, &mut out).map_err(|e| format!("解压 {relative} 失败：{e}"))?;
     }
 
-    if !target.join("node.exe").is_file() {
+    if !target.join(node_exe_name()).is_file() {
         return Err(format!(
             "解压完成但 {} 不存在，产物异常",
-            target.join("node.exe").display()
+            target.join(node_exe_name()).display()
+        ));
+    }
+    verify_installed_version(&target, version)?;
+    Ok(target)
+}
+
+/// 解压 tar.gz 到 nodes/<version>/（非 Windows 发行包形态），剥掉压缩包首层
+/// 目录（node-vX-linux-x64/）。穿越防护与 zip 路径同走 `safe_entry_path`；
+/// 符号链接条目跳过不建（启动器只用 node 本体，npm 等链接由 corepack 供给）。
+/// 跨平台实现（tar/flate2 与平台无关），Windows 上保留可编译以便单测分派逻辑。
+fn extract_tar_gz(archive_path: &Path, version: &str) -> Result<PathBuf, String> {
+    let file = std::fs::File::open(archive_path).map_err(|e| format!("打开压缩包失败：{e}"))?;
+    let gz = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+    let mut archive = tar::Archive::new(gz);
+
+    let target = paths::nodes_dir()?.join(version);
+    std::fs::create_dir_all(&target).map_err(|e| format!("创建 {} 失败：{e}", target.display()))?;
+
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("遍历压缩包条目失败：{e}"))?
+    {
+        let mut entry = entry.map_err(|e| format!("读取压缩包条目失败：{e}"))?;
+        let raw_name = entry
+            .path()
+            .map_err(|e| format!("解析条目路径失败：{e}"))?
+            .to_string_lossy()
+            .into_owned();
+        let Some(relative) = raw_name.split_once('/').map(|(_, rest)| rest.to_string()) else {
+            continue; // 首层目录项本身跳过
+        };
+        if relative.is_empty() {
+            continue;
+        }
+        let out_path = crate::paths::safe_entry_path(&target, &relative)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if entry_type.is_symlink() {
+            continue; // 见函数注释：链接条目不落地
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut out = std::fs::File::create(&out_path)
+            .map_err(|e| format!("创建 {} 失败：{e}", out_path.display()))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| format!("解压 {relative} 失败：{e}"))?;
+    }
+
+    if !target.join(node_exe_name()).is_file() {
+        return Err(format!(
+            "解压完成但 {} 不存在，产物异常",
+            target.join(node_exe_name()).display()
         ));
     }
     verify_installed_version(&target, version)?;
@@ -597,7 +693,7 @@ fn extract_zip(zip_path: &Path, version: &str) -> Result<PathBuf, String> {
 
 /// 安装后复验：运行解压出的 node --version 必须与目标版本一致。
 fn verify_installed_version(dir: &Path, version: &str) -> Result<(), String> {
-    let out = std::process::Command::new(dir.join("node.exe"))
+    let out = std::process::Command::new(dir.join(node_exe_name()))
         .arg("--version")
         .creation_flags_cv()
         .output()
@@ -726,6 +822,34 @@ mod tests {
         assert_eq!(fmt_size(512 * 1024), "512 KB");
         assert_eq!(fmt_size(12 * 1024 * 1024 + 300 * 1024), "12.3 MB");
         assert_eq!(fmt_size(2u64 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    /// 发行包命名单点（R1 P1-06）：os/arch 参数化，两个平台的分支在任一平台
+    /// 都可断言；未支持平台 fail loud。
+    #[test]
+    fn archive_name_is_platform_parameterized_and_fails_loud() {
+        assert_eq!(
+            node_archive_name("windows", "x86_64", (22, 20, 0)).unwrap(),
+            "node-v22.20.0-win-x64.zip"
+        );
+        assert_eq!(
+            node_archive_name("linux", "x86_64", (24, 12, 0)).unwrap(),
+            "node-v24.12.0-linux-x64.tar.gz"
+        );
+        let err = node_archive_name("macos", "aarch64", (24, 0, 0)).unwrap_err();
+        assert!(err.contains("暂不支持"), "实际报错：{err}");
+        // 当前宿主平台必须有实现（防新增平台参数后忘配）。
+        assert!(node_archive_name(std::env::consts::OS, std::env::consts::ARCH, (24, 0, 0)).is_ok());
+    }
+
+    /// 可执行文件名单点（R1 P1-06）：与宿主平台一致（行为锚定，防手滑改坏）。
+    #[test]
+    fn node_exe_name_matches_host_os() {
+        if cfg!(windows) {
+            assert_eq!(node_exe_name(), "node.exe");
+        } else {
+            assert_eq!(node_exe_name(), "node");
+        }
     }
 
     /// P2-03：SHASUMS256.txt 行解析——官方/二进制形态、坏行跳过、大小写归一。

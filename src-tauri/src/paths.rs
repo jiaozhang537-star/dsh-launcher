@@ -33,13 +33,27 @@ pub const MARKET_CACHE_FILE: &str = "market-cache.json";
 /// 运行记录文件名（位于托管根下）：本启动器拉起的实例进程（跨会话识别孤儿）。
 pub const RUNNING_FILE: &str = "running.json";
 
-/// 解析应用本地数据目录（Windows = `%LOCALAPPDATA%`，可移植到其他平台时替换实现）。
+/// 解析应用本地数据目录：Windows = `%LOCALAPPDATA%`；其他平台 = XDG 数据目录
+/// （`$XDG_DATA_HOME`，缺省 `~/.local/share`）。可移植层单点（对抗审查 R1
+/// P1-06：不再对非 Windows 直接报错）。
 ///
 /// 目录不存在时不创建——创建是显式的 `ensure_dirs` 决策，避免只读探测产生副作用。
 fn app_data_dir() -> Result<PathBuf, String> {
-    std::env::var("LOCALAPPDATA")
+    #[cfg(windows)]
+    return std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)
-        .map_err(|_| "环境变量 LOCALAPPDATA 未设置，无法定位应用数据目录".to_string())
+        .map_err(|_| "环境变量 LOCALAPPDATA 未设置，无法定位应用数据目录".to_string());
+    #[cfg(not(windows))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            if !xdg.is_empty() {
+                return Ok(PathBuf::from(xdg));
+            }
+        }
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(".local").join("share"))
+            .ok_or_else(|| "无法定位应用数据目录（XDG_DATA_HOME 与 HOME 均未设置）".to_string())
+    }
 }
 
 /// 解析托管根目录：`<app data>/dsh-launcher`。

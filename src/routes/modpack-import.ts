@@ -229,7 +229,7 @@ export async function openModpackImport(filePath: string | null): Promise<void> 
         if (report.installed.length > 0) {
           lines.push(`已安装 ${report.installed.length} 个插件：`);
           for (const p of report.installed) {
-            lines.push(`  · ${p.packageName} v${p.version || "?"}${p.bundleActivated ? "（已进 bundles 层）" : ""}`);
+            lines.push(`  · ${p.packageName} v${p.version || "?"}${p.bundleActivated ? "（已并入插件清单）" : ""}`);
           }
         }
         if (report.applied.length > 0) {

@@ -50,6 +50,155 @@ fn running() -> &'static Mutex<HashMap<String, RunningEntry>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 正在执行启动链的实例（对抗审查 R1 P1-02）：`launch` 的检查（查运行表）与
+/// 登记（spawn 后插入运行表）之间隔着整段前导（Node 解析 / precheck / 对账 /
+/// 停旧 / 同步配置）——两次并发的 launch 都能穿过检查，各自拉起进程后互相
+/// 覆盖运行表项，输家变成 UI 永远收不掉的孤儿。占位表让「链开始 → 运行表
+/// 登记」这一整段对同实例互斥。
+fn launching() -> &'static Mutex<std::collections::HashSet<String>> {
+    static SET: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 启动占位锁（RAII）：launch 的局部变量持有它，任何早退/失败路径经 Drop 释放。
+#[derive(Debug)]
+struct LaunchGuard(String);
+
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        launching()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+        release_launching_marker(&self.0);
+    }
+}
+
+/// 占用某实例的启动槽；已被占用（同实例启动链正在进行）时报错拒绝。
+/// 两层互斥（P7.5）：进程内 HashSet 是快路径；文件级标记跨进程——GUI 与 CLI
+/// 是两个进程，单靠内存表互相不可见，同时启动同一实例时仍会各拉一个进程。
+fn try_acquire_launch_slot(instance_id: &str) -> Result<LaunchGuard, String> {
+    if !launching()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(instance_id.to_string())
+    {
+        return Err("该实例正在启动中，请稍候".into());
+    }
+    if let Err(err) = acquire_launching_marker(instance_id) {
+        launching()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(instance_id);
+        return Err(err);
+    }
+    Ok(LaunchGuard(instance_id.to_string()))
+}
+
+/// 跨进程启动标记（`<托管根>/launching/<实例id>.json`，内容 = 持有者 pid + 时刻）。
+fn launching_marker_path(instance_id: &str) -> Result<PathBuf, String> {
+    Ok(crate::paths::managed_root()?
+        .join("launching")
+        .join(format!("{instance_id}.json")))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchingMarker {
+    pid: u32,
+    at_ms: u64,
+}
+
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 文件级启动标记：`create_new` 原子创建，已存在则看持有者——已退出（启动器
+/// 崩溃/被杀的残留）就接管重创，仍存活则拒绝。持有者是启动器进程（不是 node），
+/// 存活探测**不能**走 `pid_alive` 的镜像名核对（那只认 node.exe）。
+fn acquire_launching_marker(instance_id: &str) -> Result<(), String> {
+    let path = launching_marker_path(instance_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建启动标记目录失败：{e}"))?;
+    }
+    let write_new = |path: &PathBuf, marker: &LaunchingMarker| -> Result<(), std::io::Error> {
+        use std::io::Write;
+        let body = serde_json::to_string(marker).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("序列化启动标记失败：{e}"))
+        })?;
+        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).open(path)?;
+        file.write_all(body.as_bytes())
+    };
+    let marker = LaunchingMarker { pid: std::process::id(), at_ms: now_epoch_ms() };
+    match write_new(&path, &marker) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stale = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|body| serde_json::from_str::<LaunchingMarker>(&body).ok())
+                .map(|found| !process_alive_any(found.pid))
+                // 解析不了视为损坏残留：接管重写（宁可重试也不让脏文件永久卡死启动）。
+                .unwrap_or(true);
+            if !stale {
+                return Err(
+                    "该实例正在另一处启动（启动器界面或命令行正在执行启动链），请稍候或先停止"
+                        .into(),
+                );
+            }
+            let _ = std::fs::remove_file(&path);
+            write_new(&path, &marker)
+                .map_err(|e| format!("写入启动标记 {} 失败：{e}", path.display()))
+        }
+        Err(err) => Err(format!("写入启动标记 {} 失败：{err}", path.display())),
+    }
+}
+
+fn release_launching_marker(instance_id: &str) {
+    if let Ok(path) = launching_marker_path(instance_id) {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// 进程是否存活（**不核对镜像名**）：启动标记的持有者是启动器进程，与实例的
+/// node.exe 不同名，镜像核对会把活着的持有者误判成已退出而错误接管。
+#[cfg(windows)]
+fn process_alive_any(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    const STILL_ACTIVE_CODE: u32 = 259;
+
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let alive = GetExitCodeProcess(handle, &mut code).is_ok() && code == STILL_ACTIVE_CODE;
+        let _ = CloseHandle(handle);
+        alive
+    }
+}
+
+#[cfg(not(windows))]
+fn process_alive_any(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// 从运行表摘除指定实例**且 pid 匹配**的表项：waiter 与并发生命周期的防线
+/// ——表项可能已被新一轮 launch 覆盖（不同 pid），老 waiter 不得误删他人的。
+fn remove_running_entry(instance_id: &str, pid: u32) {
+    running()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|id, entry| !(id == instance_id && entry.pid == pid));
+}
+
 /// 实例是否在运行（FR-17 隔离切换等外部模块的守卫用；不暴露运行表内部类型）。
 pub(crate) fn is_running(instance_id: &str) -> bool {
     running()
@@ -275,7 +424,8 @@ fn wait_port_released(port: u16, budget: std::time::Duration) -> bool {
 }
 
 /// 该端口是否有人在监听（连一次即可判定；无监听者时本机连接被立刻拒绝）。
-fn port_listening(port: u16) -> bool {
+/// crate 内复用（instances::resolve_port 的 force_pinned 守卫——R2 P2-04）。
+pub(crate) fn port_listening(port: u16) -> bool {
     std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
 
@@ -484,6 +634,14 @@ pub struct LaunchOutcome {
     pub pid: u32,
 }
 
+/// 拉起的输出去向（P7.5 FR-26）：GUI 走管道 + 事件（行为零变化）；无头 CLI 走
+/// 日志文件——拉起方退出后管道会断裂，文件让进程输出与「事后查日志」都成立。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoMode {
+    Pipe,
+    LogFile,
+}
+
 /// 启动实例（阻塞到进程拉起成功；输出经事件流推送）。
 ///
 /// 校验链由 command 层先跑（`precheck::run`），这里只做拉起侧的硬前置：
@@ -495,6 +653,88 @@ pub fn launch(
     instance_id: &str,
     keep_pinned_port: bool,
 ) -> Result<LaunchOutcome, String> {
+    launch_with_io(app, instance_id, keep_pinned_port, IoMode::Pipe).map(|(outcome, _)| outcome)
+}
+
+/// 无头拉起（P7.5 CLI）：进程输出落盘实例 `logs/console.log`。返回日志位置，
+/// 就绪轮询从 `log_start_offset` 起步，不会把上一轮启动的旧输出当成本轮的。
+pub struct HeadlessLaunch {
+    pub outcome: LaunchOutcome,
+    pub log_path: PathBuf,
+    pub log_start_offset: u64,
+}
+
+pub fn launch_headless(
+    instance_id: &str,
+    keep_pinned_port: bool,
+) -> Result<HeadlessLaunch, String> {
+    let (outcome, log) = launch_with_io(None, instance_id, keep_pinned_port, IoMode::LogFile)?;
+    let Some(log) = log else {
+        return Err("内部错误：文件模式没有返回日志位置".into());
+    };
+    Ok(HeadlessLaunch { outcome, log_path: log.0, log_start_offset: log.1 })
+}
+
+/// 无头控制台日志位置（实例目录内 `logs/console.log`，随实例删除自然清理）。
+pub fn console_log_path(instance_id: &str) -> Result<PathBuf, String> {
+    Ok(instances::instance_dir(instance_id)?
+        .join("logs")
+        .join("console.log"))
+}
+
+/// 单文件轮转上限：超过则改名留档（console.old.log），重新起写。
+const CONSOLE_LOG_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 每次无头启动写入日志的分隔头——按它界定「本次启动的日志段」。URL 回扫只认
+/// 最后一段（上一轮的 token 已随旧进程失效，混入会给出打不开的地址）。
+const CONSOLE_LOG_HEADER_PREFIX: &str = "════ DSH 启动器 · 无头启动 ";
+
+struct ConsoleLogIo {
+    out: std::fs::File,
+    err: std::fs::File,
+}
+
+fn prepare_console_log_at(path: &std::path::Path) -> Result<(ConsoleLogIo, u64), String> {
+    let dir = path.parent().ok_or("日志目录路径非法")?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("创建日志目录 {} 失败：{e}", dir.display()))?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > CONSOLE_LOG_ROTATE_BYTES {
+            let old = path.with_file_name("console.old.log");
+            let _ = std::fs::remove_file(&old);
+            // 改名失败不阻断：继续在原文件上追加。
+            let _ = std::fs::rename(path, &old);
+        }
+    }
+    let open = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| format!("打开日志 {} 失败：{e}", path.display()))
+    };
+    let mut io = ConsoleLogIo { out: open()?, err: open()? };
+    use std::io::Write;
+    let header = format!(
+        "{CONSOLE_LOG_HEADER_PREFIX}{} ════\n",
+        instances::now_rfc3339()
+    );
+    io.out
+        .write_all(header.as_bytes())
+        .map_err(|e| format!("写入日志头失败：{e}"))?;
+    let offset = std::fs::metadata(path)
+        .map(|m| m.len())
+        .map_err(|e| format!("读取日志大小失败：{e}"))?;
+    Ok((io, offset))
+}
+
+/// 实例启动（两态输出）。返回 (拉起结果, 日志位置——仅文件模式有值)。
+fn launch_with_io(
+    app: Option<&tauri::AppHandle>,
+    instance_id: &str,
+    keep_pinned_port: bool,
+    io: IoMode,
+) -> Result<(LaunchOutcome, Option<(PathBuf, u64)>), String> {
     use tauri::Emitter;
 
     if running()
@@ -504,6 +744,9 @@ pub fn launch(
     {
         return Err("该实例已在运行".into());
     }
+    // 启动占位：并发/连点的第二次启动在此拒绝（运行表登记在 spawn 之后，
+    // 中间的整段前导靠这把锁挡住 TOCTOU——对抗审查 R1 P1-02）。
+    let _launch_guard = try_acquire_launch_slot(instance_id)?;
 
     let instance = instances::get_instance(instance_id)?;
     if instance.dsh_version.is_none() {
@@ -582,13 +825,43 @@ pub fn launch(
         }
     }
     if let Some(node_dir) = node_exe.parent() {
-        let prepend =
-            format!("{};{}", node_dir.display(), std::env::var("PATH").unwrap_or_default());
-        cmd.env("PATH", prepend);
+        // PATH 组装走 std 可移植原语（对抗审查 R1 P1-06）：分隔符随平台，不再手拼。
+        let mut paths = vec![node_dir.to_path_buf()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        let path_env =
+            std::env::join_paths(&paths).map_err(|e| format!("组装 PATH 环境变量失败：{e}"))?;
+        cmd.env("PATH", path_env);
     }
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .creation_flags_cv();
+    // P7.5 输出两态：GUI = 管道（下方 reader 线程）；无头 = 日志文件——拉起方
+    // （CLI 进程）退出后管道会断裂，文件让进程输出与「事后查日志」都成立。
+    // 文件模式在 spawn 前完成轮转检查与分隔头写入，保证子进程首行落在头之后。
+    let mut log_io = match io {
+        IoMode::Pipe => None,
+        IoMode::LogFile => {
+            let path = console_log_path(instance_id)?;
+            let (handles, offset) = prepare_console_log_at(&path)?;
+            Some((path, offset, handles))
+        }
+    };
+    match &log_io {
+        None => {
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+        }
+        Some((_, _, handles)) => {
+            let out = handles
+                .out
+                .try_clone()
+                .map_err(|e| format!("复制日志句柄失败：{e}"))?;
+            let err = handles
+                .err
+                .try_clone()
+                .map_err(|e| format!("复制日志句柄失败：{e}"))?;
+            cmd.stdout(std::process::Stdio::from(out))
+                .stderr(std::process::Stdio::from(err));
+        }
+    }
+    cmd.creation_flags_cv();
 
     let mut child = cmd.spawn().map_err(|e| format!("拉起 DSH 失败：{e}"))?;
     // 自愈告知：钉定端口被外部抢占而重锚定时，在控制台里说明缘由（对用户可见）。
@@ -605,21 +878,31 @@ pub fn launch(
         }
     }
     let pid = child.id();
+    if let Some((_, _, handles)) = &mut log_io {
+        use std::io::Write as _;
+        let _ = handles
+            .out
+            .write_all(format!("════ 进程 pid={pid} port={port} ════\n").as_bytes());
+    }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
     // 输出转发：每流一线程，逐行发事件；哨兵命中追加诊断事件。
-    // stdout/stderr 类型不同，按 trait 对象统一处理。
-    let streams: Vec<(&str, Box<dyn std::io::Read + Send>)> = vec![
-        (
-            "stdout",
-            Box::new(stdout.ok_or("DSH stdout 缺失")?),
-        ),
-        (
-            "stderr",
-            Box::new(stderr.ok_or("DSH stderr 缺失")?),
-        ),
-    ];
+    // stdout/stderr 类型不同，按 trait 对象统一处理。文件模式没有管道可读——
+    // URL/哨兵改由拉起方轮询日志文件（wait_web_ready_from_log），不起 reader 线程。
+    let streams: Vec<(&str, Box<dyn std::io::Read + Send>)> = match log_io {
+        None => vec![
+            (
+                "stdout",
+                Box::new(stdout.ok_or("DSH stdout 缺失")?) as Box<dyn std::io::Read + Send>,
+            ),
+            (
+                "stderr",
+                Box::new(stderr.ok_or("DSH stderr 缺失")?) as Box<dyn std::io::Read + Send>,
+            ),
+        ],
+        Some(_) => Vec::new(),
+    };
     for (stream_name, stream) in streams {
         let emitter = app.cloned();
         let id = instance_id.to_string();
@@ -704,15 +987,13 @@ pub fn launch(
 
     let waiter_app = app.cloned();
     let waiter_id = instance_id.to_string();
+    let waiter_pid = pid;
     thread::spawn(move || {
         let status = {
             let mut guard = child_arc.lock().unwrap_or_else(|p| p.into_inner());
             guard.wait()
         };
-        running()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&waiter_id);
+        remove_running_entry(&waiter_id, waiter_pid);
         sentinels()
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -761,6 +1042,10 @@ pub fn launch(
         let emitter = app.clone();
         let ready_id = instance_id.to_string();
         let ready_port = port;
+        // 代际快照（对抗审查 R2 P2-05）：监视线程无退出机制，若用户在首启等待期
+        // 直接再点启动，旧监视线程会与新启动的监视并存——事件互相打架、误报
+        // 超时。发现「当前代 ≠ 自己的代」即静默退役。
+        let my_gen = crate::launch_cancel::current_gen_of(&ready_id);
         thread::spawn(move || {
             use tauri::Emitter;
             let start = std::time::Instant::now();
@@ -786,7 +1071,11 @@ pub fn launch(
             loop {
                 // 本次启动被取消（用户点了取消）：立刻收尾，既不发就绪也不发超时
                 // ——否则取消后仍会蹦出「网页已就绪」并自动开浏览器。
-                if crate::launch_cancel::is_cancelled(&ready_id) {
+                if crate::launch_cancel::is_cancelled(&ready_id, my_gen) {
+                    return;
+                }
+                // 新一次启动已开始：旧监视退役（R2 P2-05），不发就绪/超时事件。
+                if crate::launch_cancel::current_gen_of(&ready_id) != my_gen {
                     return;
                 }
                 if let Some(url) = known_web_url(&ready_id) {
@@ -832,7 +1121,8 @@ pub fn launch(
         }
     })?;
 
-    Ok(LaunchOutcome { instance_id: instance_id.to_string(), port, pid })
+    let log_info = log_io.map(|(path, offset, _)| (path, offset));
+    Ok((LaunchOutcome { instance_id: instance_id.to_string(), port, pid }, log_info))
 }
 
 /// 停止实例：Windows 杀整棵进程树；其他平台直杀主进程。
@@ -869,6 +1159,123 @@ fn stop_recorded(instance_id: &str) -> Result<(), String> {
     forget(instance_id)
 }
 
+/// 无头就绪等待（P7.5 CLI）的结果。
+#[derive(Debug)]
+pub enum WebReady {
+    /// `dsh web` 的 URL 行命中（带令牌，已写入 running.json）。
+    Url(String),
+    /// 端口已可连但始终没有 URL 行（旧版本无鉴权栅栏，裸端口即入口）。
+    PortOnly,
+    /// 到点仍未就绪（进程还在，可稍后再查）。
+    Timeout,
+    /// 实例进程在等待期间退出了（看日志定位原因）。
+    Exited,
+}
+
+/// 无头模式的就绪等待：轮询日志新增行找 `dsh web` 的带令牌 URL；端口可连后
+/// 仍给宽限等 URL 行（与 GUI 监视线程同判据：URL 行优先、端口+宽限回落）。
+/// 命中的哨兵诊断以可读块追加进同一日志（`logs` 命令可查），追加位置在读取
+/// 位置之后，不会自我重复消费。
+pub fn wait_web_ready_from_log(
+    instance_id: &str,
+    port: u16,
+    pid: u32,
+    log_path: &std::path::Path,
+    start_offset: u64,
+    budget: std::time::Duration,
+) -> WebReady {
+    use std::io::{BufRead as _, Seek as _, SeekFrom};
+
+    const URL_GRACE: std::time::Duration = std::time::Duration::from_millis(2500);
+
+    let deadline = std::time::Instant::now() + budget;
+    let mut port_open_at: Option<std::time::Instant> = None;
+    let Ok(file) = std::fs::File::open(log_path) else {
+        return WebReady::Timeout;
+    };
+    let mut reader = BufReader::new(file);
+    if reader.seek(SeekFrom::Start(start_offset)).is_err() {
+        return WebReady::Timeout;
+    }
+    let mut diag_append =
+        std::fs::OpenOptions::new().create(true).append(true).open(log_path).ok();
+    loop {
+        // 非阻塞消费：读到当前文件尾为止，下一轮外层循环再来收新增。
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if let Some(url) = parse_web_url(trimmed) {
+                        publish_web_url(instance_id, &url);
+                        return WebReady::Url(url);
+                    }
+                    let diagnostic = sentinels()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .entry(instance_id.to_string())
+                        .or_insert_with(SentinelSession::new)
+                        .feed(trimmed);
+                    if let (Some(card), Some(handle)) = (&diagnostic, diag_append.as_mut()) {
+                        use std::io::Write as _;
+                        let block = format!(
+                            "── 诊断[{level}] {title} ──\n　原始行：{detail}\n",
+                            level = card.level,
+                            title = card.title,
+                            detail = card.detail,
+                        );
+                        let _ = handle.write_all(block.as_bytes());
+                    }
+                }
+            }
+        }
+        let now = std::time::Instant::now();
+        // 退出探测用不核对镜像的版本：pid 来自调用方自己的 LaunchOutcome（不是
+        // 外来记录），无需防 pid 复用的镜像核对，测试也不必拉真 node 进程。
+        if !process_alive_any(pid) {
+            return WebReady::Exited;
+        }
+        if port_listening(port) {
+            let opened = *port_open_at.get_or_insert(now);
+            if now.duration_since(opened) >= URL_GRACE {
+                return WebReady::PortOnly;
+            }
+        }
+        if now >= deadline {
+            return WebReady::Timeout;
+        }
+        thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+/// `running.json` 没带 URL 时的兜底（如 detached 拉起未等就绪）：扫日志**最后一
+/// 个启动段**里的 URL 行，实例仍在运行才回填并返回——旧段的 token 已失效，
+/// 混入只会给出打不开的地址。
+pub fn recover_web_url_from_log(instance_id: &str) -> Option<String> {
+    let state = process_state(instance_id).ok()?;
+    if !state.running {
+        return None;
+    }
+    if let Some(url) = known_web_url(instance_id) {
+        return Some(url);
+    }
+    let path = console_log_path(instance_id).ok()?;
+    let text = crate::paths::read_text(&path).ok()?;
+    let mut url = None;
+    for line in text.lines() {
+        if line.starts_with(CONSOLE_LOG_HEADER_PREFIX) {
+            url = None; // 新启动段开始：此前找到的 URL 属于旧进程，作废。
+        } else if let Some(found) = parse_web_url(line) {
+            url = Some(found);
+        }
+    }
+    let url = url?;
+    publish_web_url(instance_id, &url);
+    Some(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +1284,125 @@ mod tests {
     fn stop_missing_instance_is_idempotent_success() {
         assert_eq!(stop("i-never-started"), Ok(()));
         assert!(list_running().iter().all(|r| r.instance_id != "i-never-started"));
+    }
+
+    /// 启动占位锁（对抗审查 R1 P1-02）：同实例的第二条启动链必须被拒，
+    /// 持有者退出（含 Drop）后立刻可再占。P7.5 起占位含文件级标记，须沙箱化
+    /// （否则测试会往真实托管根写 launching/ 标记）。
+    #[test]
+    fn launch_slot_mutex_excludes_second_acquirer() {
+        let (_sandbox, _tmp) = crate::instances::tests::sandbox("proc-slot-mutex");
+        let id = "i-slot-mutex";
+        let _guard = try_acquire_launch_slot(id).expect("首次占用应成功");
+        let err = try_acquire_launch_slot(id).unwrap_err();
+        assert!(err.contains("正在启动中"), "实际报错：{err}");
+        drop(_guard);
+        let _guard2 = try_acquire_launch_slot(id).expect("释放后应可重新占用");
+        // 不留残余：不同实例不受影响。
+        assert!(try_acquire_launch_slot("i-slot-other").is_ok());
+    }
+
+    /// 文件级启动标记（P7.5）：活着的持有者拒绝；已死的持有者（崩溃残留）接管。
+    #[test]
+    fn launching_marker_rejects_live_and_takes_over_stale() {
+        let (_sandbox, tmp) = crate::instances::tests::sandbox("proc-launch-marker");
+        let id = "i-marker";
+        let path = launching_marker_path(id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // 活着的「别的持有者」= 本测试进程 pid（活着但标记不是我们写的）。
+        let live = LaunchingMarker { pid: std::process::id(), at_ms: 0 };
+        std::fs::write(&path, serde_json::to_string(&live).unwrap()).unwrap();
+        let err = acquire_launching_marker(id).unwrap_err();
+        assert!(err.contains("另一处启动"), "实际报错：{err}");
+        std::fs::remove_file(&path).unwrap();
+
+        // 死 pid（4_000_000 不会是真实进程）= 崩溃残留 → 接管。
+        let stale = LaunchingMarker { pid: 4_000_000, at_ms: 0 };
+        std::fs::write(&path, serde_json::to_string(&stale).unwrap()).unwrap();
+        acquire_launching_marker(id).expect("陈旧标记应被接管");
+        release_launching_marker(id);
+        assert!(!path.exists(), "释放后标记应删除");
+
+        // 损坏内容（解析不了）同样按残留接管，不让脏文件永久卡死启动。
+        std::fs::write(&path, "not-json").unwrap();
+        acquire_launching_marker(id).expect("损坏标记应被接管");
+        release_launching_marker(id);
+    }
+
+    /// 无头日志轮转（P7.5）：超限改名留档，重新起写并从头记录偏移。
+    #[test]
+    fn console_log_rotates_oversize_file() {
+        let (_sandbox, tmp) = crate::instances::tests::sandbox("proc-log-rotate");
+        let dir = tmp.join("fake-instance").join("logs");
+        let path = dir.join("console.log");
+        let (io, offset) = {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&path, vec![b'x'; CONSOLE_LOG_ROTATE_BYTES as usize + 1]).unwrap();
+            prepare_console_log_at(&path).expect("轮转后应可准备日志")
+        };
+        let old = dir.join("console.old.log");
+        assert!(old.exists(), "超限旧文件应留档");
+        assert_eq!(std::fs::metadata(&old).unwrap().len(), CONSOLE_LOG_ROTATE_BYTES + 1);
+        let fresh_len = std::fs::metadata(&path).unwrap().len();
+        assert!(fresh_len > 0 && fresh_len < 1024, "新文件应只有分隔头");
+        assert_eq!(offset, fresh_len, "起始偏移 = 分隔头之后");
+        // 未超限时二次准备：追加新分隔头，偏移前移。
+        let (_, offset2) = prepare_console_log_at(&path).unwrap();
+        assert!(offset2 > offset);
+        drop(io);
+    }
+
+    /// 无头就绪等待（P7.5）：URL 行命中 / 超时 / 进程退出三态。端口选一个
+    /// 无人监听的高位口，避免环境里恰好有服务让分支走偏。
+    #[test]
+    fn wait_web_ready_three_outcomes() {
+        let (_sandbox, tmp) = crate::instances::tests::sandbox("proc-wait-ready");
+        let dir = tmp.join("logs");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // ① URL 行命中（读取先于 pid 检查，死 pid 也不影响命中）。
+        let url_log = dir.join("a.log");
+        std::fs::write(&url_log, "dsh web: http://127.0.0.1:59891/?tok=abc\n").unwrap();
+        match wait_web_ready_from_log(
+            "wait-a",
+            59891,
+            4_000_000,
+            &url_log,
+            0,
+            std::time::Duration::from_millis(300),
+        ) {
+            WebReady::Url(url) => assert_eq!(url, "http://127.0.0.1:59891/?tok=abc"),
+            other => panic!("应命中 URL 行，实际：{other:?}"),
+        }
+
+        // ② 无 URL 行、进程活着、端口不通 → 到点超时。
+        let empty_log = dir.join("b.log");
+        std::fs::write(&empty_log, "").unwrap();
+        match wait_web_ready_from_log(
+            "wait-b",
+            59892,
+            std::process::id(),
+            &empty_log,
+            0,
+            std::time::Duration::from_millis(150),
+        ) {
+            WebReady::Timeout => {}
+            other => panic!("应超时，实际：{other:?}"),
+        }
+
+        // ③ 进程先退了（死 pid + 空日志）。
+        match wait_web_ready_from_log(
+            "wait-c",
+            59893,
+            4_000_000,
+            &empty_log,
+            0,
+            std::time::Duration::from_millis(150),
+        ) {
+            WebReady::Exited => {}
+            other => panic!("应报进程退出，实际：{other:?}"),
+        }
     }
 
     #[test]

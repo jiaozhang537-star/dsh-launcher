@@ -116,14 +116,14 @@ function versionsCardOf(
         if (!wrap.isConnected) return;
         wrap.replaceChildren();
         if (reply.versions.length === 0) {
-          wrap.append(el("p", { class: "settings-status" }, ["registry 上没有可用版本"]));
+          wrap.append(el("p", { class: "settings-status" }, ["软件源上没有可用版本"]));
           return;
         }
         if (!reply.declaresBundle) {
           wrap.append(
             el("p", { class: "settings-status settings-status--error" }, [
               icon("warning", 12),
-              " 该包未声明 dsh.bundle.patch——是依赖库而非可加载的插件，已禁用安装。",
+              " 该包是依赖库而非可加载的插件，已禁用安装。",
             ]),
           );
         }

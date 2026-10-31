@@ -452,7 +452,76 @@ pub fn remove(instance_id: &str, package: &str, progress: &mut dyn FnMut(String)
     if row.group == PluginGroup::Builtin {
         return Err(format!("{package} 是 dsh 内置层，不可删除"));
     }
-    market_install::plugin_remove(instance_id, package, progress)
+    market_install::plugin_remove(instance_id, package, progress)?;
+    // 官方链删除成功后清理 imported/ 孤儿留档（P4 挂账收口，2026-10-05 R2）。
+    // 留档无害（只占磁盘），清理失败不推翻已成功的删除——只如实提示。
+    match prune_orphan_imported(instance_id) {
+        Ok(removed) if !removed.is_empty() => {
+            progress(format!("已清理离线安装留档：{}", removed.join("、")));
+        }
+        Ok(_) => {}
+        Err(e) => progress(format!("离线安装留档清理失败（不影响删除）：{e}")),
+    }
+    Ok(())
+}
+
+/// 清理 `imported/` 里的孤儿 tarball（P4 挂账「删除插件不清理 imported/ 残留」）。
+///
+/// imported/ 留档是 file: 依赖的持久锚点（modpack 导入时落地，删了会让残余
+/// 依赖的重装链 ENOENT——2026-09-20 双包 e2e 实证），因此**只删 profile 清单
+/// dependencies 中已无任何 `file:` spec 指向的留档**：删除插件后它自己的
+/// file: 依赖已从清单移除，其留档即成孤儿；仍被引用的一律保留。
+/// file: spec 是绝对路径（modpack.rs 落档时以 `file:{persistent.display()}`
+/// 写入），比对按路径末端文件名进行。返回被清理的文件名列表。
+fn prune_orphan_imported(instance_id: &str) -> Result<Vec<String>, String> {
+    let instance = instances::get_instance(instance_id)?;
+    let manifest_path = instances::instance_dir(instance_id)?
+        .join("profiles")
+        .join(&instance.profile)
+        .join("package.json");
+    let referenced: Vec<String> = if manifest_path.is_file() {
+        let text = std::fs::read_to_string(&manifest_path).map_err(|e| format!("读清单失败：{e}"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("清单不是合法 JSON：{e}"))?;
+        value
+            .get("dependencies")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.values()
+                    .filter_map(|spec| spec.as_str())
+                    .filter(|s| s.starts_with("file:"))
+                    .map(|s| s.trim_start_matches("file:").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let imported_dir = instances::instance_dir(instance_id)?.join("imported");
+    if !imported_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut removed = Vec::new();
+    let entries =
+        std::fs::read_dir(&imported_dir).map_err(|e| format!("读取 {} 失败：{e}", imported_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("tgz") {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let still_referenced = referenced
+            .iter()
+            .any(|r| r.rsplit(['/', '\\']).next() == Some(name.as_str()));
+        if still_referenced {
+            continue;
+        }
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("清理留档 {} 失败：{e}", path.display()))?;
+        removed.push(name);
+    }
+    Ok(removed)
 }
 
 /// 切换插件启用状态（需求方走查定稿，T-2 提前落位）：enabled=false = 从
@@ -946,6 +1015,47 @@ mod tests {
             kids.iter().find(|k| k.name == "child-a").unwrap().disabled,
             "带 BOM 的用户层覆盖行必须仍被识别为停用"
         );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// imported/ 孤儿留档清理（R2，P4 挂账）：删除插件后其 file: 依赖已出清单，
+    /// 留档成孤儿 → 清；仍被引用（相对/绝对路径形态都算）的一律保留。
+    /// 布局口径：imported/ 在实例目录下（modpack.rs 落档位），清单在 profile 下。
+    #[test]
+    fn prune_orphan_imported_keeps_referenced_and_removes_orphans() {
+        let (_lock, tmp) = sandbox("prune-imported");
+        let instance = crate::instances::create_instance("留档清理", "web").unwrap();
+        let instance_root = crate::instances::instance_dir(&instance.id).unwrap();
+        let imported = instance_root.join("imported");
+        std::fs::create_dir_all(&imported).unwrap();
+        for name in ["pkg-a-1.0.0.tgz", "pkg-b-2.0.0.tgz", "pkg-orphan-3.0.0.tgz"] {
+            std::fs::write(imported.join(name), b"stub").unwrap();
+        }
+        // 清单：pkg-a 绝对路径（导入落档的原生形态）、pkg-b 相对路径（手工场景）；
+        // pkg-orphan 无任何 file: 引用。
+        let profile_dir = instance_root.join("profiles").join("web");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(
+            profile_dir.join("package.json"),
+            r#"{
+  "dependencies": {
+    "pkg-a": "file:D:\\fake\\imported\\pkg-a-1.0.0.tgz",
+    "pkg-b": "file:imported/pkg-b-2.0.0.tgz"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let removed = prune_orphan_imported(&instance.id).unwrap();
+        assert_eq!(removed, vec!["pkg-orphan-3.0.0.tgz".to_string()]);
+        assert!(imported.join("pkg-a-1.0.0.tgz").is_file(), "绝对路径引用的留档必须保留");
+        assert!(imported.join("pkg-b-2.0.0.tgz").is_file(), "相对路径引用的留档必须保留");
+        assert!(!imported.join("pkg-orphan-3.0.0.tgz").exists(), "孤儿留档必须被清理");
+
+        // 清单缺失（profile 未初始化）= 全部按孤儿处理，不 panic。
+        std::fs::remove_file(profile_dir.join("package.json")).unwrap();
+        let removed = prune_orphan_imported(&instance.id).unwrap();
+        assert_eq!(removed.len(), 2, "无清单时引用集为空，剩余留档全部清理");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }
