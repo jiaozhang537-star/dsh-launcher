@@ -214,11 +214,11 @@ pub fn list(instance_id: &str) -> Result<PluginList, String> {
 
 /// 用户层 patch 文件名（DSH 约定：profile 根的 `cordis.patch.yml`，所有
 /// bundle 层之后应用、可覆盖前层插入的行——组合包子插件启停的落点）。
-const USER_PATCH_FILENAME: &str = "cordis.patch.yml";
+pub(crate) const USER_PATCH_FILENAME: &str = "cordis.patch.yml";
 
 /// patch 文档的顶层条目序列：序列文档取自身；`insert:` 顶层键的映射文档取
 /// 该键下的数组（dsh-base 为前者、部分第三方包为后者，两种都支持）。
-fn patch_top_entries(doc: &serde_yaml::Value) -> Vec<&serde_yaml::Value> {
+pub(crate) fn patch_top_entries(doc: &serde_yaml::Value) -> Vec<&serde_yaml::Value> {
     match doc {
         serde_yaml::Value::Sequence(items) => items.iter().collect(),
         serde_yaml::Value::Mapping(map) => match map.get(serde_yaml::Value::from("insert")) {

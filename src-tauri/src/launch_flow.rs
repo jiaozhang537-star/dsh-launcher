@@ -119,7 +119,19 @@ pub fn launch_pipeline(
     }
     // 配置同步是「不改实例就跑不起来」的必要一步，取消不半途跳过它：取消在
     // 这之后落地时，改动已写入——它是幂等的，下次启动会照常再做一遍。
-    llm_bridge::sync_instance(instance_id)?;
+    let sync = llm_bridge::sync_instance(instance_id)?;
+    // FR-25 M1：收编/清理有动作才进字幕（成功静默口径）。
+    let mut sync_notes: Vec<String> = Vec::new();
+    if !sync.adopted.is_empty() {
+        sync_notes.push(format!("收编 {} 个厂商的网页侧模型", sync.adopted.len()));
+    }
+    if !sync.cleaned.is_empty() {
+        sync_notes.push(format!("清理 {} 条无效模型路由", sync.cleaned.len()));
+    }
+    if !sync_notes.is_empty() {
+        let text = format!("模型配置已同步（{}）", sync_notes.join("，"));
+        progress(66, &text);
+    }
     ensure_not_cancelled(instance_id, launch_gen)?;
     progress(70, "正在拉起实例进程…");
     let keep_pinned_port = state.running;

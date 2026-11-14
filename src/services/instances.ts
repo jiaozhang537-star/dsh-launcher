@@ -116,6 +116,12 @@ export function setInjectOverride(id: string, config: InjectConfig): Promise<voi
   return invoke<void>("inject_set_override", { id, config });
 }
 
+/** FR-25 M1：读实例原生配置（settings.yaml ∪ patch 双面）把已管厂商路由下的
+ * 模型清单收编进保险库，返回发生收编的厂商 id。只读实例文件，运行中安全。 */
+export function reconcileInstanceModels(id: string): Promise<string[]> {
+  return invoke<string[]>("instance_reconcile_models", { id });
+}
+
 /** 计算生效配置（全局默认 ⊕ 实例覆盖）。 */
 export function getEffectiveInject(id: string): Promise<InjectConfig> {
   return invoke<InjectConfig>("inject_effective", { id });

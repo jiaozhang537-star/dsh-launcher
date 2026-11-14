@@ -100,6 +100,20 @@ fn check_routes(instance_id: &str, items: &mut Vec<CheckItem>) {
             action: Some("settings".into()),
         });
     }
+    if !report.poison.is_empty() {
+        // FR-25 M1（bug 2）：毒路由会让 DSH 节级拒绝整个 llm-pi-ai 命名空间，
+        // 网页端模型选择只剩 DeepSeek 一组——如实告知，本次启动自动清理。
+        items.push(CheckItem {
+            id: "routes".into(),
+            level: Level::Warning,
+            message: format!(
+                "实例模型配置里有 {} 条无效路由（无模型清单）：{}——本次启动自动清理，清理后网页端模型才能按提供商分组",
+                report.poison.len(),
+                report.poison.join("、")
+            ),
+            action: None,
+        });
+    }
 }
 
 /// 默认模型体检（R7-1）：`agent-default-model` 只写了 model、没写 provider 时，

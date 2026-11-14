@@ -217,9 +217,11 @@ export const launchPage: PageDefinition = {
       placeholder: "默认模型",
     });
     const modelList = el("div", { class: "model-select__list" }, []);
-    let currentModel = "";
-    /** 实例当前默认模型的提供方 id（agent-default-model.provider，空 = 老实例没写）。 */
-    let currentProvider = "";
+let currentModel = "";
+/** 实例当前默认模型的提供方 id（agent-default-model.provider，空 = 老实例没写）。 */
+let currentProvider = "";
+/** 切厂商联动意图：厂商行点击置位，refreshModelState 读取完成后消费（见 followVendorDefault）。 */
+let followPendingVendor: string | null = null;
 
     keySaveBtn.addEventListener("click", () => {
       void (async () => {
@@ -228,19 +230,19 @@ export const launchPage: PageDefinition = {
         // dirty 标志为第一判据；掩码哨兵/空值恒判「未修改」（P3-02：复制
         // 掩码回贴不会被当作新 Key）。
         if (!keySaveEligible(keyInput.value, keyEdited)) {
-          noteKey(entry?.hasKey ? "Key 已保存（掩码显示，输入新值可覆盖）" : "请先输入 Key", !entry?.hasKey);
+          if (!entry?.hasKey) noteKey("请先输入 Key", true);
           return;
         }
         keySaveBtn.disabled = true;
         try {
           // 明文永不回显：只写入不读取；保存成功立即就地置掩码（不依赖刷新链）。
+          // 成功静默（灰字清理 2026-10-31）：掩码回填 + 胶囊点亮即反馈。
           await setKey(activeVendorId, value);
           knownKeys.add(activeVendorId);
           keyEdited = false;
           keyInput.value = KEY_MASK;
           keyInput.placeholder = "";
           vendorPill.classList.add("vendor-switch__pill--configured");
-          noteKey("已保存并同步到「设置页 · 模型厂商」");
           // 后台同步最新状态；失败不影响已显示的掩码态。状态可信时与保险库
           // 对账（P3-01）：权威已无 Key 的会话标记被撤销。
           const fresh = await getStatus().catch(() => null);
@@ -292,6 +294,14 @@ export const launchPage: PageDefinition = {
         currentProvider = "";
       }
       modelInput.value = currentModel;
+      // 切厂商联动挂在本次读取完成之后（followPendingVendor 消费点）：先读实例
+      // 现状、再判定归属、再写——读写同一条异步序列，不会互相覆盖。
+      if (followPendingVendor !== null) {
+        const vendorId = followPendingVendor;
+        followPendingVendor = null;
+        await followVendorDefault(vendorId);
+        return;
+      }
       await noteModelOwner();
     }
 
@@ -312,8 +322,9 @@ export const launchPage: PageDefinition = {
 
     /**
      * 默认模型归属提示（R7-1）：模型与提供方是一对。只写 model 的实例（老版本
-     * 启动器写下的）会被 DSH 当成 DeepSeek 官方模型发出去；切换厂商后默认模型仍
-     * 属于旧厂商时也要说清楚，别让用户以为换了厂商就换了模型。
+     * 启动器写下的）会被 DSH 当成 DeepSeek 官方模型发出去。切厂商后默认模型
+     * **无从联动**（新厂商还没有已添加模型）时也要说清楚，别让用户以为换了
+     * 厂商就换了模型——有模型时已自动联动（followVendorDefault），不再出这句。
      */
     async function noteModelOwner(): Promise<void> {
       if (!currentModel) return;
@@ -327,6 +338,26 @@ export const launchPage: PageDefinition = {
         (entry) => routeKeyCache.get(entry.id) === currentProvider,
       );
       if (owner) noteKey(`当前默认模型「${currentModel}」属于「${owner.label}」`);
+    }
+
+    /**
+     * 切厂商后默认模型联动（2026-11-01 需求方报障「换提供商输入框不跟着变」，
+     * 推翻本文件旧口径「只提示不联动」）：实例默认模型仍属于旧厂商时，自动
+     * 应用新厂商的第一个已添加模型（applyModel 成对写 provider+model，启动即
+     * 用新厂商——FR-21「选定的厂商与 model ID 写入实例默认模型」）。新厂商
+     * 还没有模型时无从联动，保留原值并交归属提示说清。只有显式点击厂商行才
+     * 置位 followPendingVendor，页面初始渲染不触发（不得擅自改写实例默认模型）。
+     */
+    async function followVendorDefault(vendorId: string): Promise<void> {
+      const activeKey = await routeKeyOf(vendorId);
+      if (activeVendorId !== vendorId) return; // 用户已切走：这条链过期
+      if (activeKey === null || currentProvider === activeKey) return;
+      const models = launchModelsFor(vendorStatus, vendorId);
+      if (models.length === 0) {
+        await noteModelOwner();
+        return;
+      }
+      await applyModel(models[0], vendorId);
     }
 
     function renderModelList(): void {
@@ -370,11 +401,11 @@ export const launchPage: PageDefinition = {
      * 实例侧的 `settings.yaml` **不在运行中改**：启动器侧配置一律只在下一次启动
      * 生效，启动链统一再生实例文件（`llm_bridge::sync_instance`）。
      */
-    async function applyModel(model: string): Promise<void> {
+    async function applyModel(model: string, vendorId: string = activeVendorId): Promise<void> {
       if (!selectedId) return;
       modelInput.disabled = true;
       try {
-        const provider = await routeKeyOf(activeVendorId);
+        const provider = await routeKeyOf(vendorId);
         const config = await getInjectOverride(selectedId);
         const ns: Record<string, unknown> = {
           ...((config.settings["agent-default-model"] as Record<string, unknown> | undefined) ?? {}),
@@ -391,9 +422,10 @@ export const launchPage: PageDefinition = {
         currentProvider = provider ?? "";
         modelInput.value = model;
         closeFloatingList(modelList, modelInput);
-        if (provider) {
-          noteKey(`「${model}」已记录为该实例默认模型（提供方 ${provider}）—— 下次启动生效`);
-        } else {
+        // 成功静默（2026-10-24 需求方指令「破坏界面的灰字」删——原成功句在自定义
+        // 提供方上因内部 id「custom-provider」+ 长模型名折三行糊在输入框下）：
+        // 可见反馈 = 下拉行高亮 + 输入框回填；不兼容/失败仍走红字。
+        if (!provider) {
           noteKey("该模型接口形态不兼容，无法写入实例", true);
         }
       } catch (err) {
@@ -433,6 +465,7 @@ export const launchPage: PageDefinition = {
         );
         row.addEventListener("click", () => {
           activeVendorId = entry.id;
+          followPendingVendor = entry.id; // 显式切厂商才联动默认模型
           renderVendorArea();
           closeFloatingList(vendorList, vendorPill);
         });

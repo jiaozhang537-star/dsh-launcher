@@ -138,24 +138,6 @@ fn ollama_openai_base(base: &str) -> String {
     }
 }
 
-/// 凭据库模型 id 清单 → 路由 models 数组（元数据按 llm-pi-ai 默认容量兜底）。
-fn models_profiles(models: &[String]) -> Value {
-    Value::Array(
-        models
-            .iter()
-            .map(|id| {
-                json!({
-                    "id": id,
-                    "name": id,
-                    "contextWindow": DEFAULT_MODEL_CONTEXT_WINDOW,
-                    "maxTokens": DEFAULT_MODEL_MAX_TOKENS,
-                    "input": ["text"],
-                })
-            })
-            .collect(),
-    )
-}
-
 /// 生成「启动器管理的路由」期望表 + 全部管理中路由键（含停用者——停用者的
 /// 旧路由键要从 settings.yaml 删除，且不得误判为外来路由）+ 被跳过的路由。
 ///
@@ -203,9 +185,13 @@ fn desired_routes(existing: &Map<String, Value>) -> Result<RouteDesire, String> 
             if let Some(base) = &vendor.address {
                 profile.insert("baseURL".into(), json!(base));
             }
-            // 目录路由的模型目录归 pi-ai；实例里已有的 models 原样沿用，
-            // 免得把网页侧补的条目抹掉。
-            if let Some(models) = existing_models(existing, route) {
+            // 目录路由模型清单（FR-25 M1 2026-11-01，需求方 bug 3「已添加模型不进
+            // 网页」）：keyvault 清单非空时写入——清单即该路由服务的模型全集（DSH
+            // 语义：models 替换内置目录）；空 = 维持现状服务整个内置目录。实例里
+            // 已有的条目原样沿用其元数据，keyvault 新增 id 按默认元数据兜底。
+            let models =
+                merged_model_entries(&vendor.models, existing_models(existing, route));
+            if models.as_array().is_some_and(|list| !list.is_empty()) {
                 profile.insert("models".into(), models);
             }
             routes.insert(route.to_string(), Value::Object(profile));
@@ -352,25 +338,38 @@ fn existing_models(existing: &Map<String, Value>, route: &str) -> Option<Value> 
         .map(|_| models.clone())
 }
 
-/// 自描述路由的 models = 启动器清单（默认元数据兜底）+ 实例现有清单里启动器
-/// 没有的条目（原样沿用，保住网页侧补的元数据）。无 id 的畸形条目不沿用——
-/// 写进实例会让 DSH 拒绝整节。
+/// 自描述路由与目录路由共用的 models 合并：条目按 keyvault 清单顺序（启动器
+/// 侧策展顺序），id 命中实例现有条目时**沿用其元数据**——读侧收编把网页侧
+/// 条目并进 vault 之后，若按 vault 默认元数据重写会把实例里的真实容量抹掉
+/// （元数据降级）；实例独有的条目原样追加在后，畸形无 id 条目不沿用。
 fn merged_model_entries(vendor_models: &[String], existing: Option<Value>) -> Value {
-    let mut entries: Vec<Value> = models_profiles(vendor_models)
-        .as_array()
-        .cloned()
+    let existing_entries: Vec<Value> = existing
+        .and_then(|models| models.as_array().cloned())
         .unwrap_or_default();
-    let Some(Value::Array(list)) = existing else {
-        return Value::Array(entries);
-    };
-    for entry in list {
+    let find_existing =
+        |id: &str| -> Option<Value> {
+            existing_entries
+                .iter()
+                .find(|entry| model_id_of(entry).as_deref() == Some(id))
+                .cloned()
+        };
+    let mut entries: Vec<Value> = Vec::new();
+    for id in vendor_models {
+        entries.push(find_existing(id).unwrap_or_else(|| {
+            json!({
+                "id": id,
+                "name": id,
+                "contextWindow": DEFAULT_MODEL_CONTEXT_WINDOW,
+                "maxTokens": DEFAULT_MODEL_MAX_TOKENS,
+                "input": ["text"],
+            })
+        }));
+    }
+    for entry in existing_entries {
         let Some(id) = model_id_of(&entry) else {
             continue;
         };
-        let known = entries
-            .iter()
-            .any(|known| model_id_of(known).as_deref() == Some(id.as_str()));
-        if !known {
+        if !vendor_models.iter().any(|known| known == &id) {
             entries.push(entry);
         }
     }
@@ -378,7 +377,7 @@ fn merged_model_entries(vendor_models: &[String], existing: Option<Value>) -> Va
 }
 
 /// 模型条目里的 id（`"<id>"` 与 `{ id: "<id>" }` 两种形态）。
-fn model_id_of(entry: &Value) -> Option<String> {
+pub(crate) fn model_id_of(entry: &Value) -> Option<String> {
     match entry {
         Value::String(id) if !id.is_empty() => Some(id.clone()),
         Value::Object(map) => map
@@ -390,27 +389,47 @@ fn model_id_of(entry: &Value) -> Option<String> {
     }
 }
 
-/// 从现有 settings.yaml 里挑出**外来路由**：既不在启动器管理键集合里、也不是
-/// 本次期望写入的键——用户在 DSH 模型页/网页侧自行添加的提供商，桥接必须原样
-/// 保留（`sync_instance` 写回）与如实对账（`external_route_keys`）。判定只有这
-/// 一处，避免两条路径的规则漂移。
-fn foreign_providers(
+/// 判定一条实例现有路由是否「毒路由」（FR-25 M1 2026-11-01，需求方 bug 2
+/// 「网页选模型没有分组」）：没有 models 且不在 pi-ai 目录路由集合内——DSH 对
+/// 它报 `resolves no models`，且 llm-pi-ai 的校验是**节级**（resolveProfiles
+/// fail-fast + settings 节整体 validate）：一条毒路由废掉整个命名空间，含完全
+/// 合法的其他路由。桥接不再原样保留：settings.yaml 侧不写入（0.1.5 活文档随之
+/// 痊愈），patch 侧由 native_sync::clean_patch_poison_routes 就地清除（投递箱
+/// merge 语义删不掉 patch 里的键）。
+pub(crate) fn is_poison_route(route: &str, profile: &Value) -> bool {
+    let has_models = profile
+        .get("models")
+        .and_then(Value::as_array)
+        .is_some_and(|list| !list.is_empty());
+    !has_models && !CATALOG_ROUTES.iter().any(|(_, key)| *key == route)
+}
+
+/// 从现有 settings.yaml 里挑出**外来路由**（既不在启动器管理键集合里、也不是
+/// 本次期望写入的键——用户在 DSH 模型页/网页侧自行添加的提供商），返回（保留
+/// 集， 毒路由键）。判定只有这一处，避免两条路径的规则漂移。
+fn split_foreign(
     existing: &Map<String, Value>,
     managed: &[String],
     desired: &Map<String, Value>,
-) -> Map<String, Value> {
-    let mut foreign = Map::new();
+) -> (Map<String, Value>, Vec<String>) {
+    let mut kept = Map::new();
+    let mut poison = Vec::new();
     for (key, value) in existing {
-        if !managed.contains(key) && !desired.contains_key(key) {
-            foreign.insert(key.clone(), value.clone());
+        if managed.contains(key) || desired.contains_key(key) {
+            continue;
+        }
+        if is_poison_route(key, value) {
+            poison.push(key.clone());
+        } else {
+            kept.insert(key.clone(), value.clone());
         }
     }
-    foreign
+    (kept, poison)
 }
 
 /// 实例 settings.yaml 的 `llm-pi-ai.providers` 映射（缺失/不可解析都按空处理：
 /// 路由段不存在与"没有外来路由"对桥接是同一件事）。
-fn existing_providers(instance_id: &str) -> Result<Map<String, Value>, String> {
+pub(crate) fn existing_providers(instance_id: &str) -> Result<Map<String, Value>, String> {
     let settings_path = crate::instances::instance_dir(instance_id)?.join("settings.yaml");
     if !settings_path.is_file() {
         return Ok(Map::new());
@@ -425,19 +444,17 @@ fn existing_providers(instance_id: &str) -> Result<Map<String, Value>, String> {
         .unwrap_or_default())
 }
 
-/// 该实例里**非启动器管理**的 llm 路由键（用户在网页侧自己加的提供商）。
-/// 启动对账用：只读键名，不读值、不碰内容。
+/// 该实例里**非启动器管理**的 llm 路由键（用户在网页侧自己加的提供商，毒路由
+/// 除外——它们会被清除，不算外来保留）。启动对账用：只读键名，不读值。
 pub fn external_route_keys(instance_id: &str) -> Result<BTreeSet<String>, String> {
     let existing = existing_providers(instance_id)?;
     let desire = desired_routes(&existing)?;
-    Ok(foreign_providers(&existing, &desire.managed, &desire.routes)
-        .keys()
-        .cloned()
-        .collect())
+    let (kept, _) = split_foreign(&existing, &desire.managed, &desire.routes);
+    Ok(kept.keys().cloned().collect())
 }
 
 /// 路由对账报告（R7）：本次启动会被跳过的路由（勾了启用但落不了地）+
-/// 实例里启动器不管的外来路由键。纯读，不改任何文件。
+/// 实例里启动器不管的外来路由键 + 毒路由键。纯读，不改任何文件。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteReport {
@@ -445,36 +462,57 @@ pub struct RouteReport {
     pub skipped: Vec<SkippedRoute>,
     /// 实例里非启动器管理、桥接原样保留的外来路由键。
     pub external: Vec<String>,
+    /// 毒路由（无 models 且不在 pi-ai 目录内）：DSH 节级拒绝整个模型配置的
+    /// 祸源，sync 时从实例侧清除（settings.yaml 不写入 + patch 就地删键）。
+    pub poison: Vec<String>,
 }
 
 /// 计算某实例的路由对账报告（precheck 警告 / 设置页提示共用同一份判定）。
 pub fn route_report(instance_id: &str) -> Result<RouteReport, String> {
     let existing = existing_providers(instance_id)?;
     let desire = desired_routes(&existing)?;
-    let mut external: Vec<String> = foreign_providers(&existing, &desire.managed, &desire.routes)
-        .keys()
-        .cloned()
-        .collect();
+    let (kept, mut poison) = split_foreign(&existing, &desire.managed, &desire.routes);
+    let mut external: Vec<String> = kept.keys().cloned().collect();
     external.sort();
+    poison.sort();
     Ok(RouteReport {
         skipped: desire.skipped,
         external,
+        poison,
     })
+}
+
+/// 一次同步的成果报告（launch_flow 字幕用）。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncOutcome {
+    /// 发生收编的厂商 id：实例侧（settings.yaml ∪ patch）有、保险库没有的模型
+    /// 清单已并入 keyvault（FR-25 M1 读侧收编）。
+    pub adopted: Vec<String>,
+    /// 从 profile patch 清除的毒路由键（FR-25 M1，投递箱 merge 删不掉键）。
+    pub cleaned: Vec<String>,
 }
 
 /// 把单个实例的 settings.yaml 路由段同步成期望状态（经 inject.json——
 /// settings.yaml 由 inject 引擎再生，直改会被下一次再生抹掉）。外来路由
-/// （非启动器管理键）原样保留。幂等：内容不变时也安全重写。
-pub fn sync_instance(instance_id: &str) -> Result<(), String> {
+/// （非启动器管理键）原样保留，毒路由除外（无 models 且不在 pi-ai 目录内——
+/// 它们会让 DSH 节级拒绝整个 llm-pi-ai 命名空间，见 `is_poison_route`）。
+/// 幂等：内容不变时也安全重写。
+pub fn sync_instance(instance_id: &str) -> Result<SyncOutcome, String> {
     // 读-改-写全程持 inject IO 锁（对抗审查 R2 P2-03）：与设置页保存并发时，
     // 后写者不得拿旧快照覆盖新保存。写入走 `_locked` 内核防重入死锁。
     let _io_guard = crate::inject::inject_io_lock();
     let instance = crate::instances::get_instance(instance_id)?;
+    // FR-25 M1（bug 4）：先收编实例侧（settings.yaml ∪ patch 双面）已管厂商的
+    // 模型清单再算期望表——投递箱导入是数组整体替换，不先收编就会把网页侧
+    // 新增的模型抹掉。
+    let adopted = crate::native_sync::adopt_instance_models(instance_id)?;
     let existing = existing_providers(instance_id)?;
     let desire = desired_routes(&existing)?;
 
+    let (foreign, _) = split_foreign(&existing, &desire.managed, &desire.routes);
     let mut providers = Map::new();
-    for (key, value) in foreign_providers(&existing, &desire.managed, &desire.routes) {
+    for (key, value) in foreign {
         providers.insert(key, value);
     }
     for (key, value) in desire.routes {
@@ -502,13 +540,50 @@ pub fn sync_instance(instance_id: &str) -> Result<(), String> {
             .settings
             .insert("llm-pi-ai".into(), Value::Object(namespace));
     }
+    // llm-pi-ai 是「单层整表」语义：生效层每次都被写入**全量**期望路由表，另一
+    // 层若还持有路由，effective_config 的深合并会把它的残键并回来——本机实证
+    // （2026-11-14，i-mup8jajs/0.2.0）：全局模板残留的无 models glm 让 DSH 节级
+    // 拒绝整个 llm-pi-ai，网页模型选择只剩 DeepSeek 一组。清掉非生效层的节。
     if instance.isolation {
         crate::inject::set_override_locked(instance_id, &config)?;
+        let mut template = crate::inject::get_default_template()?;
+        if template.settings.remove("llm-pi-ai").is_some() {
+            crate::inject::set_default_template_locked(&template)?;
+        }
     } else {
         crate::inject::set_default_template_locked(&config)?;
+        let mut override_config = crate::inject::get_override(instance_id)?;
+        if override_config.settings.remove("llm-pi-ai").is_some() {
+            crate::inject::set_override_locked(instance_id, &override_config)?;
+        }
     }
     crate::inject::write_instance_files(instance_id)?;
-    Ok(())
+    // patch 侧毒路由清理（FR-25 M1，bug 2）：放在实例文件写成功之后；sync 只在
+    // 启动前/注册时执行，实例必然未运行，就地编辑 patch 无并发。
+    let cleaned = crate::native_sync::clean_patch_poison_routes(instance_id)?;
+    Ok(SyncOutcome { adopted, cleaned })
+}
+
+/// 启动器已管厂商 → 路由键映射（含停用者；deepseek 除外——它的模型清单走
+/// llm-deepseek 命名空间，不在 llm-pi-ai providers 里，M1 收编切片天然不参与；
+/// 遗留键 zai/moonshotai 无厂商对应，也不在表内）。native_sync 读侧收编的路由
+/// 归属判定用，与 `desired_routes` 的管理集同源（view.catalog ∪ custom）。
+pub fn managed_vendor_routes() -> Result<Vec<(String, String)>, String> {
+    let view = crate::providers::view()?;
+    let mut map = Vec::new();
+    for entry in &view.catalog {
+        if entry.id == "deepseek" {
+            continue;
+        }
+        map.push((
+            entry.id.clone(),
+            catalog_route(&entry.id).unwrap_or(&entry.id).to_string(),
+        ));
+    }
+    for custom in &view.custom {
+        map.push((custom.id.clone(), custom.id.clone()));
+    }
+    Ok(map)
 }
 
 #[cfg(test)]
@@ -576,12 +651,13 @@ mod tests {
         let (_lock, tmp) = sandbox("foreign");
         let instance = instances::create_instance("外来测试", "web").unwrap();
         crate::keyvault::set_enabled("kimi", true).unwrap();
-        // 预置一份含「外来路由」的 settings.yaml（用户在 DSH 模型页自加）。
+        // 预置一份含「外来路由」的 settings.yaml（用户在 DSH 模型页自加，带
+        // models——无 models 的外来路由按 FR-25 M1 是毒路由，会被清除）。
         let dir = instances::instance_dir(&instance.id).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("settings.yaml"),
-            "llm-pi-ai:\n  providers:\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n",
+            "llm-pi-ai:\n  providers:\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n      models:\n        - relay-large\n",
         )
         .unwrap();
 
@@ -616,7 +692,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("settings.yaml"),
-            "llm-pi-ai:\n  providers:\n    zai:\n      api: openai-completions\n      baseURL: https://api.z.ai/api/coding/paas/v4\n    moonshotai:\n      api: openai-completions\n      baseURL: https://api.moonshot.ai/v1\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n",
+            "llm-pi-ai:\n  providers:\n    zai:\n      api: openai-completions\n      baseURL: https://api.z.ai/api/coding/paas/v4\n    moonshotai:\n      api: openai-completions\n      baseURL: https://api.moonshot.ai/v1\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n      models:\n        - relay-large\n",
         )
         .unwrap();
 
@@ -892,6 +968,42 @@ mod tests {
         assert_eq!(ollama["api"], "openai-completions");
         assert_eq!(ollama["baseURL"], "http://127.0.0.1:11434/v1");
         assert_eq!(ollama["models"][0]["id"], "qwen3:8b");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 单层整表（FR-25 M1 真机回归 2026-11-14）：全局模板残留的无 models glm
+    /// 曾被 effective_config 深合并并回隔离实例的投递箱 → DSH 节级拒绝整个
+    /// llm-pi-ai → 网页模型选择只剩 DeepSeek 一组（需求方 bug 2 的真实病根）。
+    /// sync 现在清掉非生效层的 llm-pi-ai，模板残键不再泄漏。
+    #[test]
+    fn stale_template_routes_do_not_leak_into_isolated_instance() {
+        let (_lock, tmp) = sandbox("template-poison");
+        let instance = instances::create_instance("模板毒路由", "web").unwrap();
+        // 模板里埋一份含毒 glm 的路由（老共享模式 sync 的残留形态）。
+        let mut template = crate::inject::get_default_template().unwrap();
+        template.settings.insert(
+            "llm-pi-ai".into(),
+            json!({ "providers": { "glm": { "api": "openai-completions", "baseURL": "https://open.bigmodel.cn/api/paas/v4" } } }),
+        );
+        crate::inject::set_default_template(&template).unwrap();
+        crate::keyvault::set_enabled("kimi", true).unwrap();
+
+        sync_instance(&instance.id).unwrap();
+
+        let providers = providers_of(&settings_yaml(&instance.id));
+        assert!(
+            providers.contains_key("moonshotai-cn"),
+            "生效层健康路由照写：{providers:?}"
+        );
+        assert!(
+            !providers.contains_key("glm"),
+            "模板毒路由不得深合并进实例投递箱：{providers:?}"
+        );
+        let template = crate::inject::get_default_template().unwrap();
+        assert!(
+            template.settings.get("llm-pi-ai").is_none(),
+            "非生效层（全局模板）的 llm-pi-ai 应被清掉"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 

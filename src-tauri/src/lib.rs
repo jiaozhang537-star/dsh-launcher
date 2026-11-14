@@ -14,6 +14,7 @@ mod market_cache;
 mod market_install;
 mod mirror_config;
 mod modpack;
+mod native_sync;
 mod node_runtime;
 mod paths;
 mod personalize;
@@ -102,6 +103,7 @@ pub fn run() {
             precheck_run,
             provider_route_key,
             instance_route_report,
+            instance_reconcile_models,
             market_feed,
             market_versions,
             market_github_releases,
@@ -844,6 +846,14 @@ fn provider_route_key(vendor: String) -> Result<Option<String>, String> {
 #[tauri::command]
 fn instance_route_report(id: String) -> Result<llm_bridge::RouteReport, String> {
     llm_bridge::route_report(&id)
+}
+
+/// FR-25 M1（模型域先行，bug 4）：读实例原生配置（settings.yaml ∪ profile
+/// patch 双面）把已管厂商路由下的模型清单收编进保险库，返回发生收编的厂商 id。
+/// 只读实例文件 + 并集写保险库，运行中实例安全（patch 不写，同步清理只在启动链）。
+#[tauri::command]
+fn instance_reconcile_models(id: String) -> Result<Vec<String>, String> {
+    native_sync::adopt_instance_models(&id)
 }
 
 /// 启动进度事件通道：前端加载动画按它推进百分比与步骤清单。

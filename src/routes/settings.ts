@@ -14,6 +14,7 @@ import {
   type TitlebarMode,
 } from "../lib/uiPrefs";
 import { applyBackground, clearBackgroundLayer, setBackgroundOpacity } from "../lib/background";
+import { getSelectedInstance } from "../lib/selected-instance";
 import {
   clearBackground,
   clearLogo,
@@ -29,7 +30,12 @@ import {
   setDefaultVersion,
   type SystemNodeInfo,
 } from "../services/nodeRuntime";
-import { getGlobalAgentsMd, getInstancesDir, setGlobalAgentsMd } from "../services/instances";
+import {
+  getGlobalAgentsMd,
+  getInstancesDir,
+  reconcileInstanceModels,
+  setGlobalAgentsMd,
+} from "../services/instances";
 import { recordProgress, terminalFailure, updateTask, upsertTask } from "../lib/downloadTasks";
 import { getMirror, setCommunityMirror, setMirror, testMirror, type MirrorSettingsInfo } from "../services/gateway";
 import {
@@ -126,7 +132,6 @@ function renderProviderCard(
       enableBox.disabled = true;
       try {
         await setEnabled(vendor.vendor, enableBox.checked);
-        note(enableBox.checked ? `已启用 ${meta.label}` : `已停用 ${meta.label}`);
       } catch (err) {
         note(`操作失败：${String(err)}`, true);
         enableBox.checked = !enableBox.checked;
@@ -169,7 +174,6 @@ function renderProviderCard(
       addrSave.disabled = true;
       try {
         await setAddress(vendor.vendor, addrInput.value);
-        note("地址已保存（留空 = 默认地址）");
       } catch (err) {
         note(`保存失败：${String(err)}`, true);
       } finally {
@@ -192,7 +196,6 @@ function renderProviderCard(
     void (async () => {
       const value = keyInput.value.trim();
       if (!keySaveEligible(keyInput.value, keyEdited)) {
-        note("未修改");
         return;
       }
       keySave.disabled = true;
@@ -200,7 +203,6 @@ function renderProviderCard(
         await setKey(vendor.vendor, value);
         keyEdited = false;
         keyInput.value = KEY_MASK;
-        note("Key 已加密保存");
       } catch (err) {
         note(`保存失败：${String(err).slice(0, 200)}`, true);
       } finally {
@@ -221,7 +223,6 @@ function renderProviderCard(
         keyEdited = false;
         keyInput.value = "";
         keyInput.placeholder = "sk-…（保存后加密落盘）";
-        note("已清除");
       } catch (err) {
         note(`清除失败：${String(err).slice(0, 200)}`, true);
       } finally {
@@ -236,16 +237,16 @@ function renderProviderCard(
   fetchBtn.addEventListener("click", () => {
     void (async () => {
       fetchBtn.disabled = true;
-      fetchedRow.replaceChildren(el("span", { class: "settings-progress-label" }, ["拉取中…"]));
+      fetchBtn.textContent = "拉取中…";
       try {
         fetched = await fetchModels(vendor.vendor, addrInput.value);
         renderFetched();
-        note(`拉取到 ${fetched.length} 个模型，点击“+”添加`);
       } catch (err) {
         fetchedRow.replaceChildren();
         note(`拉取失败：${String(err).slice(0, 200)}`, true);
       } finally {
         fetchBtn.disabled = false;
+        fetchBtn.textContent = "从 API 拉取模型";
       }
     })();
   });
@@ -263,7 +264,6 @@ function renderProviderCard(
             await setModels(vendor.vendor, models);
             refreshAdded();
             renderFetched();
-            note(`已添加 ${model}`);
           })();
         });
       }
@@ -284,7 +284,6 @@ function renderProviderCard(
           await setModels(vendor.vendor, models);
           refreshAdded();
           renderFetched();
-          note(`已移除 ${model}`);
         })();
       });
       chip.append(remove);
@@ -310,7 +309,6 @@ function renderProviderCard(
         addInput.value = "";
         refreshAdded();
         renderFetched();
-        note(`已添加 ${value}`);
       } catch (err) {
         note(`添加失败：${String(err)}`, true);
         models = models.filter((m) => m !== value);
@@ -327,7 +325,6 @@ function renderProviderCard(
       event.stopPropagation();
       void removeCustomProvider(meta.id)
         .then(() => {
-          note(`已删除 ${meta.label}`);
           onRemove();
         })
         .catch((err) => note(`删除失败：${String(err)}`, true));
@@ -355,7 +352,6 @@ function renderProviderCard(
       if (resetTimer) clearTimeout(resetTimer);
       void forgetVendor(meta.id)
         .then(() => {
-          note(`已从列表移除 ${meta.label}（可随时重新添加）`);
           onRemove();
         })
         .catch((err) => note(`移除失败：${String(err)}`, true));
@@ -401,6 +397,13 @@ async function renderProvidersPane(pane: HTMLElement, pendingNote?: string): Pro
   let view: Awaited<ReturnType<typeof fetchProvidersView>>;
   let status: KeyvaultStatus;
   try {
+    // FR-25 M1（进页读一次的非实时口径）：先把实例侧（网页端/手改）新增的
+    // 模型清单收编进保险库，下面的状态读取就能看到；失败不阻塞页面（下次
+    // 启动的同步链兜底）。
+    const selected = getSelectedInstance();
+    if (selected) {
+      await reconcileInstanceModels(selected).catch(() => {});
+    }
     [view, status] = await Promise.all([fetchProvidersView(), getStatus()]);
   } catch (err) {
     pane.append(
@@ -757,7 +760,7 @@ function openPresetProviderModal(
         if (address && address !== entry.base) await setAddress(entry.id, address); // 中转覆盖
         await hooks.appendOrder(entry.id); // 追加列表末尾
         close();
-        hooks.refresh(`已添加 ${entry.label}（默认已启用）`);
+        hooks.refresh();
       } catch (err) {
         errLine.textContent = `添加失败：${String(err)}`;
         addBtn.disabled = false;
@@ -816,7 +819,7 @@ function openCustomProviderModal(hooks: ProviderAddHooks): void {
         if (key) await setKey(added.id, key);
         await hooks.appendOrder(added.id);
         close();
-        hooks.refresh(`已添加自定义提供方 ${added.name}（默认已启用）`);
+        hooks.refresh();
       } catch (err) {
         errLine.textContent = `添加失败：${String(err)}`;
         addBtn.disabled = false;
@@ -903,7 +906,7 @@ async function renderNodePanel(card: HTMLElement, note?: string): Promise<void> 
     applyBtn.disabled = true;
     try {
       await setDefaultVersion(select.value);
-      statusLine.textContent = `全局默认已设为 ${select.value}`;
+      statusLine.textContent = "";
       statusLine.classList.remove("settings-status--error");
     } catch (err) {
       statusLine.textContent = `设置失败：${String(err)}`;
@@ -924,7 +927,6 @@ async function renderNodePanel(card: HTMLElement, note?: string): Promise<void> 
   let activeKey: string | null = null;
   cancelBtn.addEventListener("click", () => {
     if (activeKey) void cancelDownload(activeKey).catch(() => {});
-    progressLabel.textContent = "正在取消…";
   });
   downloadBtn.addEventListener("click", () => {
     void (async () => {
@@ -936,8 +938,8 @@ async function renderNodePanel(card: HTMLElement, note?: string): Promise<void> 
       const key = `node-${version}`;
       activeKey = key;
       downloadBtn.disabled = true;
+      downloadBtn.textContent = "下载中…";
       cancelBtn.hidden = false;
-      progressLabel.textContent = "准备下载…";
       // FR-09：Node 下载进统一任务队列（任务管理页可见、可暂停/继续/取消）。
       // phase 沿用 "source"（字节流展示态：任务行显示进度文案而非已运行时长）。
       upsertTask({
@@ -958,20 +960,21 @@ async function renderNodePanel(card: HTMLElement, note?: string): Promise<void> 
         await downloadNode(version, ({ received, total }) => {
           const text =
             total > 0 ? `下载中 ${formatBytes(received)} / ${formatBytes(total)}` : `已接收 ${formatBytes(received)}`;
-          progressLabel.textContent = text;
+          downloadBtn.textContent = text;
           recordProgress(key, received, total);
           updateTask(key, { detail: text });
         });
         updateTask(key, { status: "done", phase: "done", detail: "" });
-        // 重渲染清掉进度行，完成提示经 note 在新面板中显示。
-        await renderNodePanel(card, `已托管 ${version}`);
+        await renderNodePanel(card);
       } catch (err) {
         updateTask(key, terminalFailure(err));
         const text = String(err);
-        progressLabel.textContent = text.includes("已取消") ? "已取消下载" : `下载失败：${text}`;
+        progressLabel.textContent = text.includes("已取消") ? "" : `下载失败：${text}`;
+        if (!text.includes("已取消")) progressLabel.classList.add("settings-status--error");
       } finally {
         activeKey = null;
         downloadBtn.disabled = false;
+        downloadBtn.textContent = "下载并托管";
         cancelBtn.hidden = true;
       }
     })();
@@ -1026,7 +1029,7 @@ async function renderMirrorPanel(card: HTMLElement): Promise<void> {
       saveBtn.disabled = true;
       try {
         await setMirror(select.value, prefixInput.value.trim());
-        statusLine.textContent = "镜像源已保存";
+        statusLine.textContent = "";
         statusLine.classList.remove("settings-status--error");
       } catch (err) {
         statusLine.textContent = `保存失败：${String(err)}`;
@@ -1041,7 +1044,8 @@ async function renderMirrorPanel(card: HTMLElement): Promise<void> {
   testBtn.addEventListener("click", () => {
     void (async () => {
       testBtn.disabled = true;
-      statusLine.textContent = "测试中…";
+      testBtn.textContent = "测试中…";
+      statusLine.textContent = "";
       statusLine.classList.remove("settings-status--error");
       try {
         await setMirror(select.value, prefixInput.value.trim());
@@ -1057,6 +1061,7 @@ async function renderMirrorPanel(card: HTMLElement): Promise<void> {
         statusLine.classList.add("settings-status--error");
       } finally {
         testBtn.disabled = false;
+        testBtn.textContent = "测试此源连通性";
       }
     })();
   });
@@ -1098,7 +1103,7 @@ async function renderCommunityMirrorPanel(card: HTMLElement): Promise<void> {
       saveBtn.disabled = true;
       try {
         await setCommunityMirror(select.value);
-        statusLine.textContent = "社区资源镜像源已保存";
+        statusLine.textContent = "";
         statusLine.classList.remove("settings-status--error");
       } catch (err) {
         statusLine.textContent = `保存失败：${String(err)}`;
@@ -1114,7 +1119,8 @@ async function renderCommunityMirrorPanel(card: HTMLElement): Promise<void> {
   testBtn.addEventListener("click", () => {
     void (async () => {
       testBtn.disabled = true;
-      statusLine.textContent = "测试中…";
+      testBtn.textContent = "测试中…";
+      statusLine.textContent = "";
       statusLine.classList.remove("settings-status--error");
       try {
         await setCommunityMirror(select.value);
@@ -1130,6 +1136,7 @@ async function renderCommunityMirrorPanel(card: HTMLElement): Promise<void> {
         statusLine.classList.add("settings-status--error");
       } finally {
         testBtn.disabled = false;
+        testBtn.textContent = "测试此源连通性";
       }
     })();
   });
@@ -1226,7 +1233,7 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
   concSelect.addEventListener("change", () => {
     void setMaxDownloads(Number(concSelect.value))
       .then(() => {
-        concStatus.textContent = "已保存——对之后的下载任务生效。";
+        concStatus.textContent = "";
       })
       .catch((err) => {
         concStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
@@ -1259,7 +1266,7 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
     proxySave.disabled = true;
     void setProxy(proxyInput.value.trim())
       .then(() => {
-        proxyStatus.textContent = "已保存——对之后的下载任务生效，可用镜像源的「测试」验证连通。";
+        proxyStatus.textContent = "";
       })
       .catch((err) => {
         proxyStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
@@ -1277,17 +1284,17 @@ async function renderConfigPane(pane: HTMLElement): Promise<void> {
   );
 
   // Node 运行时
-  const nodeSection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, ["加载中…"])]);
+  const nodeSection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, [""])]);
   pane.append(nodeSection);
   await renderNodePanel(nodeSection);
 
   // DSH 版本镜像源
-  const mirrorSection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, ["加载中…"])]);
+  const mirrorSection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, [""])]);
   pane.append(mirrorSection);
   await renderMirrorPanel(mirrorSection);
 
   // 社区资源镜像源（FR-18 修订：选项落成真实设置，Phase 3 起被消费）
-  const communitySection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, ["加载中…"])]);
+  const communitySection = el("section", { class: "card settings-card" }, [el("p", { class: "settings-status" }, [""])]);
   pane.append(communitySection);
   await renderCommunityMirrorPanel(communitySection);
   // GitHub Token 提额面板已删（2026-10-24 需求方指令「市场提额删了，不需要用到」）
@@ -1327,7 +1334,6 @@ function appendThemeCard(pane: HTMLElement): void {
           currentTheme = { hue, sat: 85 };
           saveTheme(currentTheme);
           syncSwatches();
-          themeStatus.textContent = "已切换主题色。";
         });
         return swatch;
       }),
@@ -1343,14 +1349,12 @@ function appendThemeCard(pane: HTMLElement): void {
     currentTheme = { hue: Math.round(hsl.h), sat: Math.max(40, Math.min(100, hsl.s)) };
     saveTheme(currentTheme);
     syncSwatches();
-    themeStatus.textContent = `已切换主题色：${picked}`;
   });
   const themeReset = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["恢复默认"]);
   themeReset.addEventListener("click", () => {
     clearThemeOverride();
     currentTheme = null;
     syncSwatches();
-    themeStatus.textContent = "已恢复默认蓝主题。";
   });
   pane.append(
     el("section", { class: "card settings-card" }, [
