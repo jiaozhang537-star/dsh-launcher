@@ -150,7 +150,7 @@ export function renderMarketSection(container: HTMLElement): HTMLElement {
     const head = listCard.querySelector(".mk-count");
     if (loading) {
       if (head) head.textContent = "";
-      rowsBox.append(el("p", { class: "settings-status" }, ["正在聚合 npm 与 GitHub 数据…"]));
+      rowsBox.append(el("p", { class: "settings-status" }, [""]));
       return;
     }
     if (loadError) {

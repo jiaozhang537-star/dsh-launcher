@@ -69,7 +69,6 @@ describe("market-detail 二级页", () => {
     });
     const root = marketDetailPage.render();
     expect(root.textContent).toContain("全部版本");
-    expect(root.textContent).toContain("版本列表加载中…");
   });
 
   it("GitHub 直装卡（无 npmName）渲染 Releases 版本卡、操作行带安装；标题随 displayName", () => {

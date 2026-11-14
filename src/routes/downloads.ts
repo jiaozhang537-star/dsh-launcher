@@ -304,7 +304,7 @@ export const downloadsPage: PageDefinition = {
         const card = el("section", { class: "card settings-card" }, [
           el("h2", { class: "card__title" }, ["dsh 版本"]),
           el("p", { class: versionsError ? "settings-status settings-status--error" : "settings-status" }, [
-            versionsError ? `版本列表拉取失败：${versionsError}` : "版本列表加载中…",
+            versionsError ? `版本列表拉取失败：${versionsError}` : "",
           ]),
         ]);
         if (versionsError) {

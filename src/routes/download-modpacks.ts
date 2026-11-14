@@ -122,7 +122,7 @@ export function renderModpackSection(container: HTMLElement): HTMLElement {
     const head = listCard.querySelector(".mk-count");
     if (loading) {
       if (head) head.textContent = "";
-      rowsBox.append(el("p", { class: "settings-status" }, ["正在聚合整合包目录…"]));
+      rowsBox.append(el("p", { class: "settings-status" }, [""]));
       return;
     }
     if (loadError) {

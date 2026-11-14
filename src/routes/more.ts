@@ -113,7 +113,7 @@ function renderUpdate(): HTMLElement {
     });
     downloadBtn.addEventListener("click", () => {
       downloadBtn.disabled = true;
-      status.textContent = "正在下载更新（任务管理页可见进度）…";
+      downloadBtn.textContent = "下载中…";
       // 进统一任务队列（任务键 update），任务管理页可暂停/继续/取消。
       upsertTask({
         instanceId: UPDATE_TASK_KEY,
@@ -133,12 +133,12 @@ function renderUpdate(): HTMLElement {
         try {
           installerPath = await downloadUpdate(result.currentVersion);
           updateTask(UPDATE_TASK_KEY, { status: "done", phase: "done", detail: "" });
-          status.textContent = "下载完成——打开安装包，按系统安装器指引完成更新。";
           installBtn.hidden = false;
         } catch (err) {
           updateTask(UPDATE_TASK_KEY, terminalFailure(err));
           status.textContent = `下载失败：${String(err).slice(0, 200)}`;
           downloadBtn.disabled = false;
+          downloadBtn.textContent = "下载更新";
         }
       })();
     });
@@ -148,7 +148,8 @@ function renderUpdate(): HTMLElement {
   const checkBtn = el("button", { type: "button", class: "btn btn--ghost settings-inline-btn" }, ["检查更新"]);
   checkBtn.addEventListener("click", () => {
     checkBtn.disabled = true;
-    status.textContent = "正在检查更新…";
+    checkBtn.textContent = "检查中…";
+    status.textContent = "";
     notesBox.replaceChildren();
     actionRow.replaceChildren();
     void (async () => {
@@ -160,6 +161,7 @@ function renderUpdate(): HTMLElement {
         status.textContent = `检查失败：${String(err).slice(0, 200)}`;
       } finally {
         checkBtn.disabled = false;
+        checkBtn.textContent = "检查更新";
       }
     })();
   });

@@ -4,6 +4,7 @@
  * 详情页操作行即「安装技能（整仓库）」；安装落点 `<实例>/skills/<name>/`，
  * DSH 自带目录 watcher，下次启动实例即被发现。返工 W：点行进详情二级页。 */
 import { el } from "../lib/dom";
+import { showHint } from "../lib/hint";
 import { fetchSkillFeed, skillInstall, type SkillCard, type SkillFeed } from "../services/skills";
 import { cardIcon, fmtCount, metaItem, openInstanceChooser, relTime } from "./market-shared";
 import { openMarketDetail } from "./market-detail";
@@ -117,10 +118,13 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
           describe: (inst) => ({ disabled: false, note: inst.dshVersion ? `DSH ${inst.dshVersion} · :${inst.port ?? "-"}` : "未安装 DSH 本体（技能仍可先装）" }),
           run: (inst) =>
             skillInstall(inst.id, card.repo).then((outcome) => {
-              if (outcome.overwritten) {
-                return `已覆盖安装技能 ${outcome.installed.join("、")} 到「${inst.name}」（${outcome.targetDir}）——下次启动实例时生效`;
-              }
-              return `已安装 ${outcome.installed.length} 个技能（${outcome.installed.join("、")}）到「${inst.name}」——下次启动实例时生效`;
+              // 成功转左下轻提示（灰字清理 2026-10-31）：装到哪、装了什么是结果
+              // 数据，但不再以多行灰字常驻状态行。
+              const message = outcome.overwritten
+                ? `已覆盖安装技能 ${outcome.installed.join("、")} 到「${inst.name}」`
+                : `已安装 ${outcome.installed.length} 个技能到「${inst.name}」`;
+              showHint(message);
+              return "";
             }),
         });
       },
@@ -149,7 +153,7 @@ export function renderSkillSection(container: HTMLElement): HTMLElement {
     const head = listCard.querySelector(".mk-count");
     if (loading) {
       if (head) head.textContent = "";
-      rowsBox.append(el("p", { class: "settings-status" }, ["正在聚合 GitHub `dsh-skill` 目录…"]));
+      rowsBox.append(el("p", { class: "settings-status" }, [""]));
       return;
     }
     if (loadError) {

@@ -43,7 +43,7 @@ export const instanceSelectPage: PageDefinition = {
     // 语义（需求方定稿）：路径 ≠ dsh 版本。路径区只列两类条目——启动器自己的
     // 默认实例目录（自动创建的实例都落在这里）与玩家日后手动添加/整合包导入
     // 的路径；不逐实例罗列路径。
-    const defaultPathSub = el("span", { class: "sub-left__item-sub" }, ["（目录解析中…）"]);
+    const defaultPathSub = el("span", { class: "sub-left__item-sub" }, [""]);
     const pathGroup = el("div", { class: "sub-left__group" }, [
       el("div", { class: "sub-left__label" }, ["路径"]),
       el("div", { class: "sub-left__item" }, [
@@ -62,11 +62,9 @@ export const instanceSelectPage: PageDefinition = {
         try {
           const folder = await pickFolder();
           if (!folder) return;
-          note("正在注册文件夹…");
-          const inst = await registerExternalInstance(folder);
+          await registerExternalInstance(folder);
           instances = await listInstances().catch(() => instances);
           renderRight();
-          note(`已添加 ${inst.name}（原目录：${inst.dir ?? folder}）`);
         } catch (err) {
           note(`添加失败：${String(err).slice(0, 260)}`, true);
         }
@@ -120,7 +118,6 @@ export const instanceSelectPage: PageDefinition = {
       try {
         await deleteInstance(target.id);
         dropFavorite(target.id);
-        note(`已删除 ${target.name}`);
         if (currentId === target.id) {
           instances = instances.filter((i) => i.id !== target.id);
           const next = sortInstancesByRecency(instances)[0];

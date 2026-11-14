@@ -108,7 +108,7 @@ function versionsCardOf(
   statusLine: HTMLElement,
 ): HTMLElement {
   const wrap = el("div", { class: "mk-detail__versions" }, [
-    el("p", { class: "settings-status" }, ["版本列表加载中…"]),
+    el("p", { class: "settings-status" }, [""]),
   ]);
   const load = (): void => {
     void fetchVersionsCached(card.npmName as string)
@@ -157,7 +157,7 @@ function releasesCardOf(
   statusLine: HTMLElement,
 ): HTMLElement {
   const wrap = el("div", { class: "mk-detail__versions" }, [
-    el("p", { class: "settings-status" }, ["版本列表加载中…"]),
+    el("p", { class: "settings-status" }, [""]),
   ]);
   const rowOf = (rel: GithubRelease): HTMLElement => {
     const spec = installSpecOf(card, rel.tagName);

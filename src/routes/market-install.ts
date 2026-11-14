@@ -128,9 +128,7 @@ export function installToCurrent(
         detail: `${outcome.packageName} ${outcome.version} → 「${inst.name}」`,
       });
       showHint(`${outcome.packageName} 已装进「${inst.name}」`);
-      statusLine.textContent =
-        `${outcome.packageName} ${outcome.version} 已安装到「${inst.name}」并启用` +
-        `——下次启动该实例时生效（首次启动可能稍慢）`;
+      statusLine.textContent = "";
     } catch (err) {
       installStates.set(spec, { phase: "failed", detail: String(err).slice(0, 160) });
       updateTask(spec, { status: "failed", phase: "failed", detail: String(err).slice(0, 400) });

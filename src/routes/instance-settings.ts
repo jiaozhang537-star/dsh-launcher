@@ -120,14 +120,12 @@ export const instanceSettingsPage: PageDefinition = {
                   return;
                 }
                 if (newName === inst.name) {
-                  nameStatus.textContent = "名称未变化。";
                   return;
                 }
                 btn.disabled = true;
                 void renameInstance(inst.id, newName)
                   .then(() => {
                     inst.name = newName;
-                    nameStatus.textContent = "已改名。";
                     renderSection();
                   })
                   .catch((err) => {
@@ -355,7 +353,7 @@ export const instanceSettingsPage: PageDefinition = {
           workDir: workInput.value.trim() || null,
         })
           .then(() => {
-            advStatus.textContent = "已保存——下次启动该版本时生效。";
+            advStatus.textContent = "";
           })
           .catch((err) => {
             advStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
@@ -487,10 +485,8 @@ export const instanceSettingsPage: PageDefinition = {
             : "勾选即启用（下次启动生效）";
           enableBox.addEventListener("change", () => {
             enableBox.disabled = true;
-            setStatus(`正在${enableBox.checked ? "启用" : "停用"} ${p.name}…`);
             void pluginSetEnabled(inst.id, p.name, enableBox.checked)
               .then(() => {
-                setStatus(`${enableBox.checked ? "已启用" : "已停用"} ${p.name}（下次启动生效）`);
                 void load();
               })
               .catch((err) => {
@@ -516,10 +512,8 @@ export const instanceSettingsPage: PageDefinition = {
             return;
           }
           remove.disabled = true;
-          setStatus(`正在移除 ${p.name}…`);
           void pluginRemove(inst.id, p.name)
             .then(() => {
-              setStatus(`已移除 ${p.name}——下次启动实例时彻底生效。`);
               void load();
             })
             .catch((err) => {
@@ -553,12 +547,8 @@ export const instanceSettingsPage: PageDefinition = {
               : "已启用——取消勾选 = 停用（运行中实例热重载即时生效；未运行则下次启动生效）";
             box.addEventListener("change", () => {
               box.disabled = true;
-              setStatus(`正在${box.checked ? "启用" : "停用"} ${c.name}…`);
               void pluginSetChildEnabled(inst.id, c.rowId, box.checked)
                 .then(() => {
-                  setStatus(
-                    `${box.checked ? "已启用" : "已停用"} ${c.name}——运行中实例热重载即时生效，未运行则下次启动生效。`,
-                  );
                   void load();
                 })
                 .catch((err) => {
@@ -599,7 +589,7 @@ export const instanceSettingsPage: PageDefinition = {
           );
           return;
         }
-        setStatus("加载中…");
+        setStatus("");
         try {
           if (mode === "all") {
             const list = await pluginList(inst.id);
@@ -611,9 +601,6 @@ export const instanceSettingsPage: PageDefinition = {
               setStatus("该实例还没有已装插件。");
               return;
             }
-            setStatus(
-              `已扫描 ${list.plugins.length} 个插件（内置 ${builtin.length} / 第三方 ${third.length} / 自建 ${self.length}）。`,
-            );
             const modpacks = modpackRows(list.plugins);
             // 空组不出卡：删掉组内最后一个插件后，0 条的折叠组仍渲染标题行 +
             // 空列表，展开就是一片残影卡（真机走查 2026-09-20）。
@@ -631,7 +618,7 @@ export const instanceSettingsPage: PageDefinition = {
               setStatus("全部第三方插件均为最新。");
               return;
             }
-            setStatus(`发现 ${updates.length} 个可更新项。`);
+            setStatus("");
             listArea.append(
               collapsibleGroup("第三方插件", updates.length, false, updates.map(rowUpdate)),
             );
@@ -751,8 +738,8 @@ export const instanceSettingsPage: PageDefinition = {
             const { modpackExportWithProgress, pickSaveTgz } = await import("../services/modpack");
             const dest = await pickSaveTgz(packName);
             if (!dest) return;
-            status.textContent = "正在打包…";
-            const manifest = await modpackExportWithProgress(
+            exportBtn.textContent = "打包中…";
+            await modpackExportWithProgress(
               {
                 instanceId: inst.id,
                 name: packName,
@@ -764,15 +751,14 @@ export const instanceSettingsPage: PageDefinition = {
                 includeAgentsMd,
               },
               dest,
-              (detail) => {
-                status.textContent = detail;
-              },
+              () => {}, // 进度不再就地回显（灰字清理 2026-10-31）：按钮态即进度
             );
-            status.textContent = `已导出：${dest}（${manifest.plugins.length} 个插件 · ${manifest.type}）`;
+            showHint(`已导出：${dest}`);
           } catch (err) {
             status.textContent = `导出失败：${String(err).slice(0, 400)}`;
           } finally {
             exportBtn.disabled = false;
+            exportBtn.textContent = "导出整合包…";
           }
         })();
       });
