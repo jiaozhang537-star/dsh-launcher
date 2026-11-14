@@ -14,7 +14,6 @@ import {
   type TitlebarMode,
 } from "../lib/uiPrefs";
 import { applyBackground, clearBackgroundLayer, setBackgroundOpacity } from "../lib/background";
-import { getSelectedInstance } from "../lib/selected-instance";
 import {
   clearBackground,
   clearLogo,
@@ -33,7 +32,7 @@ import {
 import {
   getGlobalAgentsMd,
   getInstancesDir,
-  reconcileInstanceModels,
+  nativeReconcile,
   setGlobalAgentsMd,
 } from "../services/instances";
 import { recordProgress, terminalFailure, updateTask, upsertTask } from "../lib/downloadTasks";
@@ -397,13 +396,10 @@ async function renderProvidersPane(pane: HTMLElement, pendingNote?: string): Pro
   let view: Awaited<ReturnType<typeof fetchProvidersView>>;
   let status: KeyvaultStatus;
   try {
-    // FR-25 M1（进页读一次的非实时口径）：先把实例侧（网页端/手改）新增的
-    // 模型清单收编进保险库，下面的状态读取就能看到；失败不阻塞页面（下次
-    // 启动的同步链兜底）。
-    const selected = getSelectedInstance();
-    if (selected) {
-      await reconcileInstanceModels(selected).catch(() => {});
-    }
+    // FR-25 S2（进页读一次的非实时口径）：先把实例侧（网页端/手改）新增的
+    // 提供商收编成卡（含模型清单与 Key 迁移），下面的目录/状态读取就能看到；
+    // 失败不阻塞页面（下次启动的同步链兜底）。
+    await nativeReconcile().catch(() => {});
     [view, status] = await Promise.all([fetchProvidersView(), getStatus()]);
   } catch (err) {
     pane.append(

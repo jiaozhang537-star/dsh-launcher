@@ -104,6 +104,7 @@ pub fn run() {
             provider_route_key,
             instance_route_report,
             instance_reconcile_models,
+            native_reconcile,
             market_feed,
             market_versions,
             market_github_releases,
@@ -128,6 +129,15 @@ pub fn run() {
     ui_logo_clear,
 ])
         .setup(|app| {
+            // FR-25 S2（提供商收编）：启动即全实例对账一次（fail-soft）——网页端/
+            // 手改新增的提供商在重启启动器后被检测收编（需求方口径：非实时，
+            // 进页/重启检测，无文件监听）。CLI 模式不走 Builder，其启动链由
+            // sync_instance 内的本实例收编覆盖。
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(err) = native_sync::reconcile_all() {
+                    eprintln!("提供商收编对账失败：{err}");
+                }
+            });
             // 禁止最大化守卫安装（P6 验收补丁，需求方裁决「禁止放大、保留拖边框改尺寸」）。
             // 注意：不要在此做任何 set_size / DPI 换算——conf 850×500 + center:true 的
             // 创建路径本来就正确（c4d0e57a 实测 1071×630 物理）；此前的
@@ -854,6 +864,15 @@ fn instance_route_report(id: String) -> Result<llm_bridge::RouteReport, String> 
 #[tauri::command]
 fn instance_reconcile_models(id: String) -> Result<Vec<String>, String> {
     native_sync::adopt_instance_models(&id)
+}
+
+/// FR-25 S2（提供商收编）：全实例对账——网页端/手改新增的自描述路由收编成
+/// 启动器提供商卡（providers.json adopted 条目 + keyvault 建档 + Key 从实例
+/// .credentials.yaml 只读迁移），并顺带跑 M1 的模型清单收编。设置页提供商
+/// pane 打开时调用（非实时口径：进页读一次，无文件监听）。
+#[tauri::command]
+fn native_reconcile() -> Result<native_sync::ReconcileReport, String> {
+    native_sync::reconcile_all()
 }
 
 /// 启动进度事件通道：前端加载动画按它推进百分比与步骤清单。

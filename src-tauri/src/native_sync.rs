@@ -11,7 +11,9 @@
 //!   与网页端同一写入面）。
 //!
 //! M1 范围（2026-11-01）：已管厂商路由下模型清单的读侧收编（keyvault 并集）与
-//! 毒路由清理；M2 在本模块扩展提供商整体收编 / MCP / 钩子 / Key 迁移。
+//! 毒路由清理；S2（2026-11-14）新增**提供商收编**——实例侧非管理自描述路由
+//! 收编成启动器提供商卡（providers.json adopted 条目 + keyvault 建档 + Key 从
+//! 实例 .credentials.yaml 只读迁移）；M2 后续在本模块扩展 MCP / 钩子。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -28,9 +30,10 @@ fn user_patch_path(instance_id: &str) -> Result<PathBuf, String> {
         .join(crate::plugin_manage::USER_PATCH_FILENAME))
 }
 
-/// patch 文档里 `id: llm-pi-ai` 条目的 `config.providers.<路由>.models` 的
-/// 模型 id 清单（0.1.7+ 网页端写入面）。文件缺失/损坏/异形 = 空，fail-soft。
-fn patch_provider_models(instance_id: &str) -> Result<Vec<(String, Vec<String>)>, String> {
+/// patch 文档里 `id: llm-pi-ai` 条目的 `config.providers.<路由>` **完整
+/// profile**（0.1.7+ 网页端写入面），serde_yaml → serde_json 逐条转换（转换
+/// 失败的条目跳过）。文件缺失/损坏/异形 = 空，fail-soft。
+fn patch_provider_profiles(instance_id: &str) -> Result<Vec<(String, serde_json::Value)>, String> {
     let path = user_patch_path(instance_id)?;
     if !path.is_file() {
         return Ok(Vec::new());
@@ -55,37 +58,36 @@ fn patch_provider_models(instance_id: &str) -> Result<Vec<(String, Vec<String>)>
             let Some(route) = key.as_str() else {
                 continue;
             };
-            let Some(models) = profile.get("models").and_then(Value::as_sequence) else {
+            let Ok(json) = serde_json::to_value(profile) else {
                 continue;
             };
-            let ids: Vec<String> = models.iter().filter_map(yaml_model_id).collect();
-            if !ids.is_empty() {
-                out.push((route.to_string(), ids));
-            }
+            out.push((route.to_string(), json));
         }
     }
     Ok(out)
 }
 
-/// 模型条目里的 id（serde_yaml 形态：`"<id>"` 与 `{ id: "<id>" }` 两表）。
-fn yaml_model_id(entry: &Value) -> Option<String> {
-    match entry {
-        Value::String(id) if !id.is_empty() => Some(id.clone()),
-        Value::Mapping(map) => map
-            .get(Value::from("id"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string),
-        _ => None,
-    }
-}
-
-/// 实例侧 llm-pi-ai 路由的模型 id 清单（双面合并：settings.yaml 面 + patch 面，
-/// 同路由拼接后保序去重）。
-pub fn instance_side_models(instance_id: &str) -> Result<BTreeMap<String, Vec<String>>, String> {
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+/// 实例侧 llm-pi-ai 路由的**完整 profile**（双面合并：settings.yaml 面 +
+/// patch 面，同路由 patch 优先——网页端是更新的写入方）。
+pub fn instance_side_profiles(
+    instance_id: &str,
+) -> Result<BTreeMap<String, serde_json::Value>, String> {
+    let mut out: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     // 面 1：settings.yaml（0.1.5 活文档 / 0.1.7+ 启动器上次投递的残本）。
     for (route, profile) in crate::llm_bridge::existing_providers(instance_id)? {
+        out.insert(route, profile);
+    }
+    // 面 2：profile patch 行（0.1.7+ 网页端真实落点）。
+    for (route, profile) in patch_provider_profiles(instance_id)? {
+        out.insert(route, profile);
+    }
+    Ok(out)
+}
+
+/// 实例侧 llm-pi-ai 路由的模型 id 清单（双面合并，同路由拼接后保序去重）。
+pub fn instance_side_models(instance_id: &str) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (route, profile) in instance_side_profiles(instance_id)? {
         let Some(models) = profile.get("models").and_then(serde_json::Value::as_array) else {
             continue;
         };
@@ -96,10 +98,6 @@ pub fn instance_side_models(instance_id: &str) -> Result<BTreeMap<String, Vec<St
         if !ids.is_empty() {
             out.entry(route).or_default().extend(ids);
         }
-    }
-    // 面 2：profile patch 行（0.1.7+ 网页端真实落点）。
-    for (route, ids) in patch_provider_models(instance_id)? {
-        out.entry(route).or_default().extend(ids);
     }
     for list in out.values_mut() {
         *list = dedup_keep_order(list);
@@ -141,6 +139,148 @@ pub fn adopt_instance_models(instance_id: &str) -> Result<Vec<String>, String> {
     }
     adopted.sort();
     Ok(adopted)
+}
+
+/// DSH 路由 profile 的 api 协议名 → 启动器接口形态（`llm_bridge::protocol_of`
+/// 的逆映射）。DSH 网页端自定义提供方只能三选一（pi-ai supportedProtocols）。
+fn style_of_api(api: &str) -> Option<crate::providers::ApiStyle> {
+    match api {
+        "openai-completions" => Some(crate::providers::ApiStyle::Openai),
+        "openai-responses" => Some(crate::providers::ApiStyle::Responses),
+        "anthropic-messages" => Some(crate::providers::ApiStyle::Anthropic),
+        _ => None,
+    }
+}
+
+/// 读实例 `.credentials.yaml`（DSH 网页端凭据文件）里的一个凭据值。**只读，
+/// 绝不写该文件**（phase-08 §6 红线）。两代形态都认：0.1.7+ 为
+/// `{version, records, refs: {<ref>: 值}}`（provider 引用在 `refs` 段，records
+/// 是连接授权），更早版本为扁平 ref→值映射。文件缺失/损坏/键不存在 = None，
+/// fail-soft。
+fn credential_value(instance_id: &str, ref_name: &str) -> Result<Option<String>, String> {
+    let path = crate::instances::instance_dir(instance_id)?.join(".credentials.yaml");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = crate::paths::read_text(&path)?;
+    let Ok(doc) = serde_yaml::from_str::<Value>(&text) else {
+        return Ok(None);
+    };
+    if let Some(value) = doc
+        .get("refs")
+        .and_then(|refs| refs.get(ref_name))
+        .and_then(Value::as_str)
+    {
+        return Ok((!value.is_empty()).then(|| value.to_string()));
+    }
+    Ok(doc
+        .get(ref_name)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty()))
+}
+
+/// 提供商收编（FR-25 S2，phase-08）：实例侧（settings.yaml ∪ patch 双面）里
+/// **非启动器管理**的自描述路由（带 api 字段）→ providers.json 收编卡
+/// （adopted=true、id=路由键）+ keyvault 建档（启用、模型清单、Key 从实例
+/// `.credentials.yaml` 只读迁移）。收编卡当场参与后续 sync 的 desired_routes
+/// ——「下次启动任何 web 都会带上该提供商」的落点。
+///
+/// 不收编：管理集路由、撞名合并遗留键（zai/moonshotai，已并入 glm/kimi 卡）、
+/// `deepseek-official`（bundle 内建 adapter）、无 api 字段的目录路由 profile
+/// （给 pi-ai 内置目录路由配 Key——启动器没有其协议/基址数据，留后续）、api
+/// 协议在配置映射表外的形态。幂等：收编后路由进入管理集，天然跳过。
+/// 返回本次收编的路由键（排序）。
+pub fn adopt_instance_providers(instance_id: &str) -> Result<Vec<String>, String> {
+    let profiles = instance_side_profiles(instance_id)?;
+    if profiles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let managed: std::collections::BTreeSet<String> =
+        crate::llm_bridge::managed_vendor_routes()?
+            .into_iter()
+            .map(|(_, route)| route)
+            .collect();
+    let mut adopted = Vec::new();
+    for (route, profile) in &profiles {
+        if managed.contains(route)
+            || crate::llm_bridge::is_legacy_route(route)
+            || route == "deepseek-official"
+        {
+            continue;
+        }
+        let Some(api) = profile.get("api").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(style) = style_of_api(api) else {
+            continue;
+        };
+        let Some(base) = profile.get("baseURL").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let name = profile
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(route);
+        crate::providers::adopt_custom(route, name, base, style)?;
+        crate::keyvault::set_enabled(route, true)?;
+        let models: Vec<String> = profile
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .map(|list| list.iter().filter_map(crate::llm_bridge::model_id_of).collect())
+            .unwrap_or_default();
+        if !models.is_empty() {
+            crate::keyvault::set_models(route, &models)?;
+        }
+        // Key 迁移（只读实例凭据文件）：ref = profile.apiKeyEnv（网页端写入），
+        // 缺省按 deriveKeyRef 规则兜底。
+        let key_ref = profile
+            .get("apiKeyEnv")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::keyvault::adopted_env_name(route));
+        if let Some(key) = credential_value(instance_id, &key_ref)? {
+            crate::keyvault::set_key(route, &key)?;
+        }
+        adopted.push(route.clone());
+    }
+    adopted.sort();
+    Ok(adopted)
+}
+
+/// 一次全实例对账的成果（设置页进页 / 启动器重启触发）。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileReport {
+    /// 收编成提供商卡的实例路由键。
+    pub adopted_providers: Vec<String>,
+    /// 收编进保险库模型清单的厂商 id（M1）。
+    pub adopted_models: Vec<String>,
+}
+
+/// 全实例对账（FR-25 S2 + M1）：逐实例提供商收编 + 模型清单收编，单实例
+/// 失败不阻塞其余（fail-soft）。幂等：已收编内容天然跳过。
+pub fn reconcile_all() -> Result<ReconcileReport, String> {
+    let mut adopted_providers = Vec::new();
+    let mut adopted_models = Vec::new();
+    for instance in crate::instances::list_instances()? {
+        if let Ok(mut list) = adopt_instance_providers(&instance.id) {
+            adopted_providers.append(&mut list);
+        }
+        if let Ok(mut list) = adopt_instance_models(&instance.id) {
+            adopted_models.append(&mut list);
+        }
+    }
+    adopted_providers.sort();
+    adopted_providers.dedup();
+    adopted_models.sort();
+    adopted_models.dedup();
+    Ok(ReconcileReport {
+        adopted_providers,
+        adopted_models,
+    })
 }
 
 /// patch 侧毒路由清理（M1，需求方 bug 2「网页选模型没有分组」）：从 `id:
@@ -251,10 +391,9 @@ mod tests {
         )
         .unwrap();
 
-        let models = patch_provider_models(&instance.id).unwrap();
+        let models = instance_side_models(&instance.id).unwrap();
         assert_eq!(models.len(), 1, "agent-default-model 条目不参与：{models:?}");
-        assert_eq!(models[0].0, "custom-x");
-        assert_eq!(models[0].1, vec!["relay-a", "relay-b"]);
+        assert_eq!(models.get("custom-x").unwrap(), &vec!["relay-a", "relay-b"]);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -335,7 +474,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "- id: llm-pi-ai\n  config:\n    providers:\n      glm:\n        api: openai-completions\n      moonshotai-cn:\n        apiKeyEnv: MOONSHOT_API_KEY\n      custom-y:\n        api: openai-completions\n        models:\n          - keep-me\n- id: agent-default-model\n  config:\n    provider: deepseek-official\n    model: deepseek-v4-flash\n",
+            "- id: llm-pi-ai\n  config:\n    providers:\n      glm:\n        api: openai-completions\n      moonshotai-cn:\n        apiKeyEnv: MOONSHOT_API_KEY\n      custom-y:\n        api: openai-completions\n        models:\n          - { id: keep-me, name: keep-me }\n- id: agent-default-model\n  config:\n    provider: deepseek-official\n    model: deepseek-v4-flash\n",
         )
         .unwrap();
 
@@ -354,7 +493,9 @@ mod tests {
         assert!(providers.get("glm").is_none(), "毒路由已删");
         assert!(providers.get("moonshotai-cn").is_some(), "目录路由保留");
         assert_eq!(
-            providers.get("custom-y").unwrap().get("models").unwrap()[0].as_str(),
+            providers.get("custom-y").unwrap().get("models").unwrap()[0]
+                .get("id")
+                .and_then(Value::as_str),
             Some("keep-me"),
             "健康外来路由原样"
         );
@@ -444,6 +585,221 @@ mod tests {
             route["models"][0]["id"], "web-added-model",
             "路由清单带收编后的模型（投递箱数组替换也不丢）"
         );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 提供商收编全链（FR-25 S2，夹具即需求方真机案例 openai2）：patch 里网页端
+    /// 新增的自描述路由 → providers.json adopted 卡 + keyvault 建档（启用/模型/
+    /// Key 从实例 .credentials.yaml 只读迁移）→ 注入名与网页 deriveKeyRef 一致。
+    #[test]
+    fn adopt_provider_creates_card_vault_and_migrates_key() {
+        let (_lock, tmp) = sandbox("adopt-provider");
+        let instance = instances::create_instance("提供商收编", "web").unwrap();
+        let pdir = profile_dir(&instance.id);
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join(crate::plugin_manage::USER_PATCH_FILENAME),
+            "- id: llm-pi-ai\n  config:\n    providers:\n      openai2:\n        displayName: \" bonsai2-27b\"\n        apiKeyEnv: OPENAI2_API_KEY\n        api: openai-completions\n        baseURL: http://192.168.10.105:8080/v1\n        models:\n          - id: bonsai2-27b\n            name: bonsai2-27b\n",
+        )
+        .unwrap();
+        std::fs::write(
+            instances::instance_dir(&instance.id)
+                .unwrap()
+                .join(".credentials.yaml"),
+            // 0.1.7+ 真实形态：provider 引用在 refs 段（records 是连接授权）。
+            "version: 1\nrecords:\n  client-connection/browser-session:\n    kind: grant\nrefs:\n  OPENAI2_API_KEY: \"sk-web-key-123\"\n",
+        )
+        .unwrap();
+
+        let adopted = adopt_instance_providers(&instance.id).unwrap();
+        assert_eq!(adopted, vec!["openai2"]);
+
+        let view = crate::providers::view().unwrap();
+        let card = view
+            .custom
+            .iter()
+            .find(|c| c.id == "openai2")
+            .expect("收编卡应存在");
+        assert!(card.adopted, "来源 = 网页侧");
+        assert_eq!(card.name, "bonsai2-27b", "displayName trim 后入卡");
+        assert_eq!(card.base, "http://192.168.10.105:8080/v1");
+        assert!(matches!(card.style, crate::providers::ApiStyle::Openai));
+        assert!(view.order.iter().any(|id| id == "openai2"), "排序表收录");
+
+        let vendor = crate::keyvault::status()
+            .unwrap()
+            .vendors
+            .into_iter()
+            .find(|v| v.vendor == "openai2")
+            .expect("保险库应建档");
+        assert!(vendor.enabled, "收编即启用（下次启动任何 web 都带上）");
+        assert_eq!(vendor.models, vec!["bonsai2-27b"]);
+        assert!(vendor.has_key, "Key 已从实例凭据文件迁移");
+        assert_eq!(crate::keyvault::reveal_key_for("openai2").unwrap(), "sk-web-key-123");
+        assert_eq!(
+            crate::keyvault::env_name_of("openai2").as_deref(),
+            Some("OPENAI2_API_KEY"),
+            "注入名 = 网页 deriveKeyRef = .credentials.yaml 引用"
+        );
+
+        let again = adopt_instance_providers(&instance.id).unwrap();
+        assert!(again.is_empty(), "幂等：收编后路由进入管理集，天然跳过");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 不收编名单：管理集路由、撞名合并遗留键（zai/moonshotai）、deepseek 内建
+    /// adapter、无 api 字段的目录路由 profile、协议映射表外的 api。
+    #[test]
+    fn adopt_provider_skips_managed_legacy_and_unknown_shapes() {
+        let (_lock, tmp) = sandbox("adopt-skip");
+        let instance = instances::create_instance("收编排除", "web").unwrap();
+        let pdir = profile_dir(&instance.id);
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join(crate::plugin_manage::USER_PATCH_FILENAME),
+            "- id: llm-pi-ai\n  config:\n    providers:\n      moonshotai-cn:\n        apiKeyEnv: MOONSHOT_API_KEY\n      zai:\n        api: openai-completions\n        baseURL: https://api.z.ai/v1\n        models:\n          - glm-4.6\n      deepseek-official:\n        api: openai-completions\n        baseURL: https://api.deepseek.com\n        models:\n          - deepseek-v4-flash\n      mistral:\n        apiKeyEnv: MISTRAL_API_KEY\n        models:\n          - mistral-large\n      carrier-pigeon:\n        api: carrier-pigeon\n        baseURL: https://coop.example\n        models:\n          - coo\n",
+        )
+        .unwrap();
+
+        let adopted = adopt_instance_providers(&instance.id).unwrap();
+        assert!(adopted.is_empty(), "全部命中排除名单/未知形态：{adopted:?}");
+        assert!(
+            !crate::providers::view().unwrap().custom.iter().any(|c| c.adopted),
+            "不应产生任何收编卡"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 网页端没存 Key 的路由（profile 无 apiKeyEnv）：照常收编，Key 如实空缺
+    /// （设置页「未配置」呈现 + precheck 覆盖）。
+    #[test]
+    fn adopt_provider_without_key_creates_keyless_card() {
+        let (_lock, tmp) = sandbox("adopt-keyless");
+        let instance = instances::create_instance("无 Key 收编", "web").unwrap();
+        let pdir = profile_dir(&instance.id);
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join(crate::plugin_manage::USER_PATCH_FILENAME),
+            "- id: llm-pi-ai\n  config:\n    providers:\n      my-relay:\n        api: anthropic-messages\n        baseURL: https://relay.example.com\n        models:\n          - relay-large\n",
+        )
+        .unwrap();
+
+        let adopted = adopt_instance_providers(&instance.id).unwrap();
+        assert_eq!(adopted, vec!["my-relay"]);
+        let card = crate::providers::view()
+            .unwrap()
+            .custom
+            .into_iter()
+            .find(|c| c.id == "my-relay")
+            .unwrap();
+        assert!(matches!(card.style, crate::providers::ApiStyle::Anthropic));
+        let vendor = crate::keyvault::status()
+            .unwrap()
+            .vendors
+            .into_iter()
+            .find(|v| v.vendor == "my-relay")
+            .unwrap();
+        assert!(vendor.enabled && !vendor.has_key, "启用但无 Key，如实空缺");
+        assert_eq!(
+            crate::keyvault::env_name_of("my-relay").as_deref(),
+            Some("MY_RELAY_API_KEY")
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 端到端：启动链内收编 → sync 用**同一路由键**重写路由（apiKeyEnv 保持
+    /// 网页原值），再 sync 内容稳定（路由已由启动器接管，不再是外来保留）。
+    #[test]
+    fn adopted_provider_route_round_trips_on_sync() {
+        let (_lock, tmp) = sandbox("adopt-sync");
+        let instance = instances::create_instance("收编端到端", "web").unwrap();
+        let pdir = profile_dir(&instance.id);
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join(crate::plugin_manage::USER_PATCH_FILENAME),
+            "- id: llm-pi-ai\n  config:\n    providers:\n      openai2:\n        displayName: \" bonsai2-27b\"\n        apiKeyEnv: OPENAI2_API_KEY\n        api: openai-completions\n        baseURL: http://192.168.10.105:8080/v1\n        models:\n          - id: bonsai2-27b\n            name: bonsai2-27b\n",
+        )
+        .unwrap();
+
+        let outcome = crate::llm_bridge::sync_instance(&instance.id).unwrap();
+        assert_eq!(outcome.adopted_providers, vec!["openai2"], "启动链内收编");
+        let read_settings = || -> serde_json::Value {
+            serde_yaml::from_str(
+                &crate::paths::read_text(
+                    &instances::instance_dir(&instance.id).unwrap().join("settings.yaml"),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let route = &read_settings()["llm-pi-ai"]["providers"]["openai2"];
+        assert_eq!(route["api"], "openai-completions");
+        assert_eq!(route["baseURL"], "http://192.168.10.105:8080/v1");
+        assert_eq!(route["apiKeyEnv"], "OPENAI2_API_KEY", "env 名保持网页原值");
+        assert_eq!(route["displayName"], "bonsai2-27b");
+        assert_eq!(route["models"][0]["id"], "bonsai2-27b");
+
+        let again = crate::llm_bridge::sync_instance(&instance.id).unwrap();
+        assert!(again.adopted_providers.is_empty(), "已收编不再重复");
+        assert_eq!(
+            read_settings()["llm-pi-ai"]["providers"]["openai2"]["apiKeyEnv"],
+            "OPENAI2_API_KEY",
+            "路由由启动器接管后内容稳定"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 畸形 models 条目 = 毒路由（FR-25 S2 走查期间真机实证的第四形态）：
+    /// patch 里字符串条目让 DSH schema 节级拒绝整个 llm-pi-ai（插件未激活，
+    /// 网页只剩 DeepSeek 一组），且投递箱导入连带被拒、毒条目自我延续——
+    /// 只能就地清理，健康路由由投递箱在下次导入时以对象形态重建。
+    #[test]
+    fn malformed_model_entries_are_poison_and_cleaned() {
+        let (_lock, tmp) = sandbox("malformed");
+        let instance = instances::create_instance("畸形模型", "web").unwrap();
+        let path = profile_dir(&instance.id).join(crate::plugin_manage::USER_PATCH_FILENAME);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "- id: llm-pi-ai\n  config:\n    providers:\n      moonshotai-cn:\n        apiKeyEnv: MOONSHOT_API_KEY\n        models:\n          - kimi-web-added-test\n      custom-y:\n        api: openai-completions\n        models:\n          - { id: keep-me, name: keep-me }\n",
+        )
+        .unwrap();
+
+        // 判定：目录路由带畸形条目也是毒（schema 校验不看目录身份）。
+        assert!(crate::llm_bridge::is_poison_route(
+            "moonshotai-cn",
+            &serde_json::json!({ "models": ["kimi-web-added-test"] })
+        ));
+        assert!(!crate::llm_bridge::is_poison_route(
+            "moonshotai-cn",
+            &serde_json::json!({ "models": [{ "id": "kimi-k2.5" }] })
+        ));
+
+        let removed = clean_patch_poison_routes(&instance.id).unwrap();
+        assert_eq!(removed, vec!["moonshotai-cn"], "畸形条目路由清除，健康路由保留");
+        let doc: Value = serde_yaml::from_str(&crate::paths::read_text(&path).unwrap()).unwrap();
+        let providers = doc.as_sequence().unwrap()[0]
+            .get("config")
+            .unwrap()
+            .get("providers")
+            .unwrap();
+        assert!(providers.get("moonshotai-cn").is_none());
+        assert!(providers.get("custom-y").is_some());
+
+        // 端到端自愈：sync 后投递箱以对象形态重建该路由（保险库清单里已有该 id）。
+        crate::keyvault::set_models("kimi", &["kimi-web-added-test".into()]).unwrap();
+        crate::keyvault::set_enabled("kimi", true).unwrap();
+        crate::llm_bridge::sync_instance(&instance.id).unwrap();
+        let settings: serde_json::Value = serde_yaml::from_str(
+            &crate::paths::read_text(
+                &instances::instance_dir(&instance.id).unwrap().join("settings.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let models = &settings["llm-pi-ai"]["providers"]["moonshotai-cn"]["models"];
+        assert_eq!(models[0]["id"], "kimi-web-added-test", "同 id 以对象形态重建");
+        assert!(models[0]["contextWindow"].is_u64(), "补齐 schema 元数据");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

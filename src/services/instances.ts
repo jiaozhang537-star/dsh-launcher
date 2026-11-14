@@ -122,6 +122,12 @@ export function reconcileInstanceModels(id: string): Promise<string[]> {
   return invoke<string[]>("instance_reconcile_models", { id });
 }
 
+/** FR-25 S2：全实例对账——网页端/手改新增的自描述路由收编成启动器提供商卡
+ * （含 Key 迁移），并顺带跑模型清单收编；返回两者 id 集合。 */
+export function nativeReconcile(): Promise<{ adoptedProviders: string[]; adoptedModels: string[] }> {
+  return invoke("native_reconcile");
+}
+
 /** 计算生效配置（全局默认 ⊕ 实例覆盖）。 */
 export function getEffectiveInject(id: string): Promise<InjectConfig> {
   return invoke<InjectConfig>("inject_effective", { id });

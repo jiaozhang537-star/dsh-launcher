@@ -60,11 +60,15 @@ fn default_group() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomProvider {
-    /// 稳定 id：`custom-<slug>`（slug 由名称生成，撞名加序号）。
+    /// 稳定 id：`custom-<slug>`（slug 由名称生成，撞名加序号）；收编条目
+    /// （`adopted=true`）的 id = 实例路由键，sync 靠它接管同一路由。
     pub id: String,
     pub name: String,
     pub base: String,
     pub style: ApiStyle,
+    /// 来源 = 网页端/手改收编（FR-25 S2）；用户手建恒为 false。
+    #[serde(default)]
+    pub adopted: bool,
 }
 
 /// 排序与自定义提供方持久化根。
@@ -105,6 +109,15 @@ pub fn is_custom_id(vendor: &str) -> bool {
         && vendor["custom-".len()..]
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// 是否收编条目（FR-25 S2）：providers.json 里 adopted=true 的自定义条目。
+/// 布局读不出来按 false（fail-soft，与 load_layout 的损坏降级同语义）。
+pub fn is_adopted_id(id: &str) -> bool {
+    load_layout()
+        .ok()
+        .map(|layout| layout.custom.iter().any(|c| c.adopted && c.id == id))
+        .unwrap_or(false)
 }
 
 /// 持久化文件：`<managed root>/providers.json`。
@@ -198,6 +211,7 @@ pub fn add_custom(name: &str, base: &str, style: ApiStyle) -> Result<CustomProvi
         name: name.to_string(),
         base: base.to_string(),
         style,
+        adopted: false,
     };
     layout.custom.push(provider.clone());
     layout.order.push(provider.id.clone());
@@ -205,13 +219,45 @@ pub fn add_custom(name: &str, base: &str, style: ApiStyle) -> Result<CustomProvi
     Ok(provider)
 }
 
-/// 删除自定义提供方（内置目录条目拒绝）。连带清除该厂商在保险库的记录
-/// （Key/模型/启用态）——先清保险库再删布局：前者失败则整体未动，后者
-/// 失败时重试幂等。
+/// 提供商收编落条目（FR-25 S2，phase-08）：id = 实例路由键、adopted=true。
+/// 已存在同 id 条目时幂等返回（重复对账不重复建档）；name 只作展示，与现有
+/// 卡片重名不拒绝（稳定键是 id）；base 校验与 add_custom 同口径。
+pub fn adopt_custom(id: &str, name: &str, base: &str, style: ApiStyle) -> Result<(), String> {
+    let name = name.trim();
+    let base = base.trim().trim_end_matches('/');
+    if id.is_empty() {
+        return Err("收编提供方 id 不能为空".into());
+    }
+    if name.is_empty() {
+        return Err("收编提供方名称不能为空".into());
+    }
+    if base.is_empty() || !base.starts_with("http://") && !base.starts_with("https://") {
+        return Err(format!("收编提供方 {id:?} 的地址必须是 http(s) URL：{base:?}"));
+    }
+    let mut layout = load_layout()?;
+    if layout.custom.iter().any(|c| c.id == id) {
+        return Ok(());
+    }
+    layout.custom.push(CustomProvider {
+        id: id.to_string(),
+        name: name.to_string(),
+        base: base.to_string(),
+        style,
+        adopted: true,
+    });
+    layout.order.push(id.to_string());
+    save_layout(&layout)
+}
+
+/// 删除自定义提供方（内置目录条目拒绝；收编条目同权可删）。连带清除该厂商
+/// 在保险库的记录（Key/模型/启用态）——**先清保险库再删布局**：收编条目的
+/// 裸路由键 id 在布局摘除后就不再被 keyvault::valid_vendor 认可，顺序反了会
+/// 误报「不支持的厂商」；前者失败则整体未动，后者失败时重试幂等。
 pub fn remove_custom(id: &str) -> Result<(), String> {
-    if !is_custom_id(id) {
+    if !is_custom_id(id) && !is_adopted_id(id) {
         return Err(format!("{id:?} 不是自定义提供方（内置目录不可删）"));
     }
+    crate::keyvault::forget_vendor(id)?;
     {
         let mut layout = load_layout()?;
         let before = layout.custom.len();
@@ -222,7 +268,7 @@ pub fn remove_custom(id: &str) -> Result<(), String> {
         }
         save_layout(&layout)?;
     }
-    crate::keyvault::forget_vendor(id)
+    Ok(())
 }
 
 /// 保存拖拽排序：必须恰好覆盖全部已知 id（内置 ∪ 自定义），多/少/重复都拒绝
@@ -403,6 +449,39 @@ mod tests {
         assert_eq!(style, ApiStyle::Gemini);
         assert_eq!(base, "https://relay.example.com");
         assert!(resolve_style_and_base("custom-ghost").is_err());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// FR-25 S2：收编卡（adopted，id=实例路由键）的建档/排序/删除——keyvault
+    /// 白名单放行收编 id（valid_vendor 第三析取）；set_order 全量覆盖接受；
+    /// remove_custom 连带清保险库（先清 vault 再摘布局的调序回归），重删报不存在。
+    #[test]
+    fn adopted_card_vault_write_remove_and_order() {
+        let (_lock, tmp) = sandbox("adopted");
+        adopt_custom("acme-gateway", "Acme", "https://acme.example/v1/", ApiStyle::Openai).unwrap();
+        // 幂等：同 id 重复收编不重复建档。
+        adopt_custom("acme-gateway", "Acme", "https://acme.example/v1", ApiStyle::Openai).unwrap();
+        assert_eq!(load_layout().unwrap().custom.iter().filter(|c| c.id == "acme-gateway").count(), 1);
+
+        // keyvault 白名单放行收编 id（裸路由键，无 custom- 前缀）。
+        crate::keyvault::set_enabled("acme-gateway", true).unwrap();
+        crate::keyvault::set_models("acme-gateway", &["acme-large".into()]).unwrap();
+        crate::keyvault::set_key("acme-gateway", "sk-acme").unwrap();
+
+        // set_order 全量覆盖（内置 ∪ 自定义 ∪ 收编）必须接受。
+        let mut order: Vec<String> = catalog().into_iter().map(|e| e.id).collect();
+        order.extend(load_layout().unwrap().custom.iter().map(|c| c.id.clone()));
+        order.reverse();
+        set_order(&order).unwrap();
+
+        // 删除收编卡：保险库连带清空；布局摘除后重删报不存在（valid_vendor
+        // 已不认裸 id，调序回归——先清 vault 再摘布局）。
+        remove_custom("acme-gateway").unwrap();
+        assert!(
+            crate::keyvault::status().unwrap().vendors.iter().all(|v| v.vendor != "acme-gateway"),
+            "保险库记录应连带清除"
+        );
+        assert!(remove_custom("acme-gateway").is_err());
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

@@ -102,8 +102,28 @@ pub fn custom_env_name(vendor: &str) -> Option<String> {
     Some(name)
 }
 
-/// 厂商的注入环境变量名：目录厂商用 pi-ai 规范名，自定义提供方按 id 派生。
-/// None = 该厂商不需要 Key（ollama 本地网关）——路由照写，只是不带 apiKeyEnv。
+/// 收编厂商（FR-25 S2，id = 实例路由键）的注入环境变量名：与 DSH 网页端
+/// `deriveKeyRef` 同一条规则（id 大写化、非字母数字连续段折成单个 `_`、接
+/// `_API_KEY`）。三方一致是收编语义的关键：路由重写后的 `apiKeyEnv` = 网页
+/// 凭据引用 = 启动器注入名，`.credentials.yaml` 里的旧引用不失效。
+pub fn adopted_env_name(id: &str) -> String {
+    let mut upper = String::new();
+    let mut last_under = false;
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            upper.push(ch.to_ascii_uppercase());
+            last_under = false;
+        } else if !last_under {
+            upper.push('_');
+            last_under = true;
+        }
+    }
+    format!("{upper}_API_KEY")
+}
+
+/// 厂商的注入环境变量名：目录厂商用 pi-ai 规范名，自定义提供方按 id 派生，
+/// 收编厂商（裸路由键 id）按网页端 deriveKeyRef 规则派生。None = 该厂商不
+/// 需要 Key（ollama 本地网关）——路由照写，只是不带 apiKeyEnv。
 pub fn env_name_of(vendor: &str) -> Option<String> {
     if let Some(name) = vendor_env_name(vendor) {
         return Some(name.to_string());
@@ -111,7 +131,11 @@ pub fn env_name_of(vendor: &str) -> Option<String> {
     if vendor == "ollama" {
         return None;
     }
-    custom_env_name(vendor)
+    if vendor.starts_with("custom-") {
+        return custom_env_name(vendor);
+    }
+    // 裸路由键只能是收编条目（valid_vendor 已把无关 id 挡在保险库外）。
+    Some(adopted_env_name(vendor))
 }
 
 /// 单厂商保险库条目。
@@ -366,12 +390,15 @@ fn default_vault() -> Vault {
     }
 }
 
-/// 厂商合法性：自定义提供方 ∪ 内置目录全部 id——与 providers-catalog
-/// 同口径（R5 修复：此前只放行 deepseek/openai，目录里其余厂商的启用/存
-/// Key/模型/地址全被误拒，前端勾选必然回弹）。GitHub 提额通道删除后
-/// （2026-10-24）github 不再是合法写入对象，存量条目只被读取侧过滤。
+/// 厂商合法性：自定义提供方 ∪ 内置目录全部 id ∪ 收编条目（FR-25 S2，裸路由
+/// 键 id）——与 providers-catalog 同口径（R5 修复：此前只放行 deepseek/openai，
+/// 目录里其余厂商的启用/存 Key/模型/地址全被误拒，前端勾选必然回弹）。GitHub
+/// 提额通道删除后（2026-10-24）github 不再是合法写入对象，存量条目只被读取
+/// 侧过滤。
 fn valid_vendor(vendor: &str) -> bool {
-    crate::providers::is_custom_id(vendor) || crate::providers::catalog_entry(vendor).is_some()
+    crate::providers::is_custom_id(vendor)
+        || crate::providers::catalog_entry(vendor).is_some()
+        || crate::providers::is_adopted_id(vendor)
 }
 
 /// 取厂商条目，不存在则按默认建档（deepseek 预填内置模型，其余空）。
@@ -1020,5 +1047,14 @@ mod tests {
         if let Ok(text) = repaired {
             assert_ne!(text, secret.to_vec(), "篡改后不应还原出原文");
         }
+    }
+
+    /// FR-25 S2：收编厂商 env 名派生与网页端 deriveKeyRef 同一条规则——大写化、
+    /// 连续非字母数字折成**单个**下划线、接 `_API_KEY`。
+    #[test]
+    fn adopted_env_name_matches_web_derive_key_ref() {
+        assert_eq!(adopted_env_name("openai2"), "OPENAI2_API_KEY");
+        assert_eq!(adopted_env_name("acme-gateway"), "ACME_GATEWAY_API_KEY");
+        assert_eq!(adopted_env_name("a--b.c"), "A_B_C_API_KEY");
     }
 }

@@ -120,8 +120,14 @@ pub fn launch_pipeline(
     // 配置同步是「不改实例就跑不起来」的必要一步，取消不半途跳过它：取消在
     // 这之后落地时，改动已写入——它是幂等的，下次启动会照常再做一遍。
     let sync = llm_bridge::sync_instance(instance_id)?;
-    // FR-25 M1：收编/清理有动作才进字幕（成功静默口径）。
+    // FR-25 M1/S2：收编/清理有动作才进字幕（成功静默口径）。
     let mut sync_notes: Vec<String> = Vec::new();
+    if !sync.adopted_providers.is_empty() {
+        sync_notes.push(format!(
+            "收编 {} 个网页侧提供商",
+            sync.adopted_providers.len()
+        ));
+    }
     if !sync.adopted.is_empty() {
         sync_notes.push(format!("收编 {} 个厂商的网页侧模型", sync.adopted.len()));
     }

@@ -115,6 +115,12 @@ fn catalog_route(vendor: &str) -> Option<&'static str> {
 /// 已知边界：用户在 DSH 网页端手工添加的同名路由也会被清除，接受。
 const LEGACY_ROUTE_KEYS: &[&str] = &["zai", "moonshotai"];
 
+/// 是否撞名合并裁撤的遗留路由键（FR-25 S2：提供商收编的排除名单——这些键
+/// 已并入 glm/kimi 卡，收编回去等于复活已裁撤厂商）。
+pub(crate) fn is_legacy_route(route: &str) -> bool {
+    LEGACY_ROUTE_KEYS.contains(&route)
+}
+
 /// 接口形态 → 配置协议名（pi-ai supportedProtocols 三值）；None = 该形态无法
 /// 自描述（gemini 目录路由走 catalog_route，不经此处）。
 fn protocol_of(style: &str) -> Option<&'static str> {
@@ -390,18 +396,29 @@ pub(crate) fn model_id_of(entry: &Value) -> Option<String> {
 }
 
 /// 判定一条实例现有路由是否「毒路由」（FR-25 M1 2026-11-01，需求方 bug 2
-/// 「网页选模型没有分组」）：没有 models 且不在 pi-ai 目录路由集合内——DSH 对
-/// 它报 `resolves no models`，且 llm-pi-ai 的校验是**节级**（resolveProfiles
-/// fail-fast + settings 节整体 validate）：一条毒路由废掉整个命名空间，含完全
-/// 合法的其他路由。桥接不再原样保留：settings.yaml 侧不写入（0.1.5 活文档随之
-/// 痊愈），patch 侧由 native_sync::clean_patch_poison_routes 就地清除（投递箱
-/// merge 语义删不掉 patch 里的键）。
+/// 「网页选模型没有分组」）：DSH 对它报 `resolves no models`，且 llm-pi-ai 的
+/// 校验是**节级**（resolveProfiles fail-fast + settings 节整体 validate）：一条
+/// 毒路由废掉整个命名空间，含完全合法的其他路由。两种毒形态：
+/// 1. **无 models 且不在 pi-ai 目录路由集合内**——模型只能来自配置；
+/// 2. **models 含畸形条目**（非对象、或对象缺 id）——schema 要求
+///    `models: modelProfile[]`，字符串条目直接 ValidationError（真机实证
+///    2026-11-14：patch 残留字符串条目 → 插件未激活 → 网页只剩 DeepSeek 一组，
+///    且投递箱导入连带被拒、毒条目自我延续，只能就地清理）。
+/// 桥接不再原样保留：settings.yaml 侧不写入（0.1.5 活文档随之痊愈），patch 侧
+/// 由 native_sync::clean_patch_poison_routes 就地清除（投递箱 merge 删不掉键）。
 pub(crate) fn is_poison_route(route: &str, profile: &Value) -> bool {
-    let has_models = profile
-        .get("models")
-        .and_then(Value::as_array)
-        .is_some_and(|list| !list.is_empty());
-    !has_models && !CATALOG_ROUTES.iter().any(|(_, key)| *key == route)
+    let in_catalog = CATALOG_ROUTES.iter().any(|(_, key)| *key == route);
+    match profile.get("models").and_then(Value::as_array) {
+        None => !in_catalog,
+        Some(list) if list.is_empty() => !in_catalog,
+        Some(list) => list.iter().any(|entry| {
+            entry
+                .as_object()
+                .and_then(|map| map.get("id"))
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        }),
+    }
 }
 
 /// 从现有 settings.yaml 里挑出**外来路由**（既不在启动器管理键集合里、也不是
@@ -489,6 +506,8 @@ pub struct SyncOutcome {
     /// 发生收编的厂商 id：实例侧（settings.yaml ∪ patch）有、保险库没有的模型
     /// 清单已并入 keyvault（FR-25 M1 读侧收编）。
     pub adopted: Vec<String>,
+    /// 收编成启动器提供商卡的实例路由键（FR-25 S2 提供商收编）。
+    pub adopted_providers: Vec<String>,
     /// 从 profile patch 清除的毒路由键（FR-25 M1，投递箱 merge 删不掉键）。
     pub cleaned: Vec<String>,
 }
@@ -507,6 +526,10 @@ pub fn sync_instance(instance_id: &str) -> Result<SyncOutcome, String> {
     // 模型清单再算期望表——投递箱导入是数组整体替换，不先收编就会把网页侧
     // 新增的模型抹掉。
     let adopted = crate::native_sync::adopt_instance_models(instance_id)?;
+    // FR-25 S2（提供商收编）：本实例网页端/手改新增的自描述路由收编成启动器
+    // 卡——收编结果当场参与下面的 desired_routes（「下次启动任何 web 都会带上
+    // 该提供商」的落点）。
+    let adopted_providers = crate::native_sync::adopt_instance_providers(instance_id)?;
     let existing = existing_providers(instance_id)?;
     let desire = desired_routes(&existing)?;
 
@@ -561,7 +584,11 @@ pub fn sync_instance(instance_id: &str) -> Result<SyncOutcome, String> {
     // patch 侧毒路由清理（FR-25 M1，bug 2）：放在实例文件写成功之后；sync 只在
     // 启动前/注册时执行，实例必然未运行，就地编辑 patch 无并发。
     let cleaned = crate::native_sync::clean_patch_poison_routes(instance_id)?;
-    Ok(SyncOutcome { adopted, cleaned })
+    Ok(SyncOutcome {
+        adopted,
+        adopted_providers,
+        cleaned,
+    })
 }
 
 /// 启动器已管厂商 → 路由键映射（含停用者；deepseek 除外——它的模型清单走
@@ -657,7 +684,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("settings.yaml"),
-            "llm-pi-ai:\n  providers:\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n      models:\n        - relay-large\n",
+            "llm-pi-ai:\n  providers:\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n      models:\n        - { id: relay-large, name: relay-large }\n",
         )
         .unwrap();
 
@@ -692,7 +719,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("settings.yaml"),
-            "llm-pi-ai:\n  providers:\n    zai:\n      api: openai-completions\n      baseURL: https://api.z.ai/api/coding/paas/v4\n    moonshotai:\n      api: openai-completions\n      baseURL: https://api.moonshot.ai/v1\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n      models:\n        - relay-large\n",
+            "llm-pi-ai:\n  providers:\n    zai:\n      api: openai-completions\n      baseURL: https://api.z.ai/api/coding/paas/v4\n    moonshotai:\n      api: openai-completions\n      baseURL: https://api.moonshot.ai/v1\n    my-own-relay:\n      api: openai-completions\n      baseURL: https://x.example.com\n      models:\n        - { id: relay-large, name: relay-large }\n",
         )
         .unwrap();
 
