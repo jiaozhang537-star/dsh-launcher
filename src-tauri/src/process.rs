@@ -1305,7 +1305,7 @@ mod tests {
     /// 文件级启动标记（P7.5）：活着的持有者拒绝；已死的持有者（崩溃残留）接管。
     #[test]
     fn launching_marker_rejects_live_and_takes_over_stale() {
-        let (_sandbox, tmp) = crate::instances::tests::sandbox("proc-launch-marker");
+        let _sandbox = crate::instances::tests::sandbox("proc-launch-marker");
         let id = "i-marker";
         let path = launching_marker_path(id).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

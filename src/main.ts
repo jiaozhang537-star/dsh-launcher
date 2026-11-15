@@ -15,6 +15,7 @@ import { mountTaskFab } from "./components/task-fab";
 import { mountRouter, registerPages } from "./router";
 import { applyBackground } from "./lib/background";
 import { isTempShowAll, setTempShowAll } from "./lib/uiPrefs";
+import { initVisibilityLifecycle } from "./lib/visibility";
 
 // 首帧前套用已保存的自定义主题色（FR-11；无覆盖 = theme.css 静态默认蓝）。
 initTheme();
@@ -32,6 +33,9 @@ window.addEventListener("keydown", (event) => {
 });
 
 registerPages([launchPage, downloadsPage, settingsPage, morePage, instanceSelectPage, instanceSettingsPage, marketDetailPage, tasksPage]);
+
+// 启动器可见性退出钩子（FR-28）：最后一个实例退出后按设置关闭/重新打开窗口。
+initVisibilityLifecycle();
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) {

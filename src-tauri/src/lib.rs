@@ -64,6 +64,10 @@ pub fn run() {
             max_downloads_set,
             proxy_get,
             proxy_set,
+            default_isolation_get,
+            default_isolation_set,
+            launcher_visibility_get,
+            launcher_visibility_set,
             node_default_get,
             node_default_set,
             inject_get_override,
@@ -366,6 +370,37 @@ fn proxy_set(proxy: String) -> Result<(), String> {
     }
     let mut config = node_runtime::load_config()?;
     config.proxy = if trimmed.is_empty() { None } else { Some(trimmed) };
+    node_runtime::save_config(&config)
+}
+
+/// 默认版本隔离（Phase 8.5，FR-17 扩展）：新装实例的隔离默认；None = 完全隔离。
+#[tauri::command]
+fn default_isolation_get() -> Result<bool, String> {
+    Ok(node_runtime::load_config()?.effective_default_isolation())
+}
+
+#[tauri::command]
+fn default_isolation_set(value: bool) -> Result<(), String> {
+    let mut config = node_runtime::load_config()?;
+    config.default_isolation = Some(value);
+    node_runtime::save_config(&config)
+}
+
+/// 启动器可见性（Phase 8.5，FR-28）：PCL LaunchArgumentVisible 原值系
+/// （0/2/3/4/5，1 弃用）；None = 保持不变。
+#[tauri::command]
+fn launcher_visibility_get() -> Result<u8, String> {
+    Ok(node_runtime::load_config()?.effective_launcher_visibility())
+}
+
+#[tauri::command]
+fn launcher_visibility_set(value: u8) -> Result<(), String> {
+    // PCL 值系 0/2/3/4/5（1 从未使用）；收到越界值如实拒绝，不静默夹取。
+    if !matches!(value, 0 | 2 | 3 | 4 | 5) {
+        return Err(format!("启动器可见性档位无效：{value}"));
+    }
+    let mut config = node_runtime::load_config()?;
+    config.launcher_visibility = Some(value);
     node_runtime::save_config(&config)
 }
 

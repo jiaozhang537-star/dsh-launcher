@@ -53,7 +53,16 @@ import { fetchModels } from "../services/provider";
 import { keySaveEligible } from "../lib/vendor";
 import { providerIconPath } from "../lib/providerIcon";
 import { PRESET_HUES, deriveThemeTokens, hexToHsl, loadTheme, saveTheme, clearThemeOverride, type ThemeColor } from "../lib/theme";
-import { getMaxDownloads, getProxy, setMaxDownloads, setProxy } from "../services/launcherConfig";
+import {
+  getDefaultIsolation,
+  getLauncherVisibility,
+  getMaxDownloads,
+  getProxy,
+  setDefaultIsolation,
+  setLauncherVisibility,
+  setMaxDownloads,
+  setProxy,
+} from "../services/launcherConfig";
 import {
   addCustomProvider,
   fetchProvidersView,
@@ -1146,6 +1155,82 @@ async function renderCommunityMirrorPanel(card: HTMLElement): Promise<void> {
 
 async function renderConfigPane(pane: HTMLElement): Promise<void> {
   pane.replaceChildren();
+
+  // 启动选项（Phase 8.5，PCL PageSetupLaunch 启动选项卡同构——需求方 2026-11-14
+  // 裁决：默认版本隔离 + 启动器可见性两项；游戏窗口标题/自定义信息/窗口大小经
+  // PCL 源码考证后砍——DSH 网页无启动器可控的窗口面）。
+  // 默认版本隔离（FR-17 扩展）：DSH 无 Mod 加载器/快照之分，PCL 五档收敛两档；
+  // 仅作新装实例默认，已有实例各走版本设置页（PCL ToolTip 原文改「版本→实例」）。
+  const isoDefaultSelect = el(
+    "select",
+    {
+      class: "settings-input",
+      title:
+        "当安装新实例时，据此自动设置新实例的隔离选项。\n若想调整已有实例的隔离策略，请前往它的版本设置。",
+    },
+    [],
+  );
+  isoDefaultSelect.append(
+    el("option", { value: "false" }, ["关闭"]),
+    el("option", { value: "true" }, ["完全隔离"]),
+  );
+  const isoDefaultStatus = el("p", { class: "settings-status" }, [""]);
+  void getDefaultIsolation()
+    .then((v) => {
+      isoDefaultSelect.value = String(v);
+    })
+    .catch((err) => {
+      isoDefaultStatus.textContent = `读取失败：${String(err).slice(0, 160)}`;
+    });
+  isoDefaultSelect.addEventListener("change", () => {
+    void setDefaultIsolation(isoDefaultSelect.value === "true")
+      .then(() => {
+        isoDefaultStatus.textContent = "";
+      })
+      .catch((err) => {
+        isoDefaultStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
+      });
+  });
+
+  // 启动器可见性（FR-28）：PCL LaunchArgumentVisible 五档，「游戏」映射「实例」；
+  // 值系沿用 PCL（0/2/3/4/5，1 弃用）。触发点 = 网页就绪（lib/visibility.ts）。
+  const visibleSelect = el("select", { class: "settings-input" }, []);
+  for (const [value, label] of [
+    ["0", "实例启动后立即关闭"],
+    ["2", "实例启动后隐藏，实例退出后自动关闭"],
+    ["3", "实例启动后隐藏，实例退出后重新打开"],
+    ["4", "实例启动后最小化"],
+    ["5", "实例启动后仍保持不变"],
+  ] as Array<[string, string]>) {
+    visibleSelect.append(el("option", { value }, [label]));
+  }
+  const visibleStatus = el("p", { class: "settings-status" }, [""]);
+  void getLauncherVisibility()
+    .then((v) => {
+      visibleSelect.value = String(v);
+    })
+    .catch((err) => {
+      visibleStatus.textContent = `读取失败：${String(err).slice(0, 160)}`;
+    });
+  visibleSelect.addEventListener("change", () => {
+    void setLauncherVisibility(Number(visibleSelect.value))
+      .then(() => {
+        visibleStatus.textContent = "";
+      })
+      .catch((err) => {
+        visibleStatus.textContent = `保存失败：${String(err).slice(0, 200)}`;
+      });
+  });
+
+  pane.append(
+    el("section", { class: "card settings-card" }, [
+      el("h2", { class: "card__title" }, ["启动选项"]),
+      el("div", { class: "settings-row" }, [el("span", {}, ["默认版本隔离："]), isoDefaultSelect]),
+      el("div", { class: "settings-row" }, [el("span", {}, ["启动器可见性："]), visibleSelect]),
+      isoDefaultStatus,
+      visibleStatus,
+    ]),
+  );
 
   // 全局 AGENTS.md（FILE-LAYOUT：全局输入框落点 = 托管根 AGENTS.md 文件，
   // 物化下发各版本；实例可在「版本设置 → 设置」单独覆盖）。

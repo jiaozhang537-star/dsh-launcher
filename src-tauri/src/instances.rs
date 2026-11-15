@@ -351,7 +351,12 @@ pub fn create_instance(name: &str, profile: &str) -> Result<Instance, String> {
         dir: None,
         launch_args: None,
         work_dir: None,
-        isolation: true,
+        // 默认版本隔离（Phase 8.5，FR-17 扩展）：新装实例读全局默认（PCL
+        // LaunchArgumentIndieV2 同语义——仅管新装版本，已有实例各走版本设置页）。
+        // 读取失败回落完全隔离：安全默认，不让配置损坏扩大共享面。
+        isolation: crate::node_runtime::load_config()
+            .map(|cfg| cfg.effective_default_isolation())
+            .unwrap_or(true),
     };
 
     let dir = instance_dir(&id)?;
@@ -1422,6 +1427,28 @@ pub(crate) mod tests {
         set_advanced(&inst.id, Some("   ".into()), None).unwrap();
         let cleared = get_instance(&inst.id).unwrap();
         assert!(cleared.launch_args.is_none() && cleared.work_dir.is_none(), "空串 = 清除覆盖");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Phase 8.5（FR-17 扩展）：create_instance 读全局默认版本隔离——未配置 =
+    /// 完全隔离；配置关闭 = 新实例 born 关隔离；先建的实例不受影响（默认项只管
+    /// 新装，PCL LaunchArgumentIndieV2 同语义，已有实例各走版本设置页）。
+    #[test]
+    fn create_instance_reads_default_isolation_from_config() {
+        let (_lock, tmp) = sandbox("default-iso");
+        let first = create_instance("无配置默认", "web").unwrap();
+        assert!(first.isolation, "未配置时新实例应 born 完全隔离");
+        crate::node_runtime::save_config(&crate::node_runtime::LauncherConfig {
+            default_isolation: Some(false),
+            ..crate::node_runtime::LauncherConfig::default()
+        })
+        .unwrap();
+        let second = create_instance("配置关闭", "web").unwrap();
+        assert!(!second.isolation, "配置关闭后新实例应 born 关隔离");
+        assert!(
+            get_instance(&first.id).unwrap().isolation,
+            "先建的实例不受默认项变更影响"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 

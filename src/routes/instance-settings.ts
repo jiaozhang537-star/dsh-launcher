@@ -293,8 +293,19 @@ export const instanceSettingsPage: PageDefinition = {
       agentsArea.rows = 8;
       // 需求方 2026-10-24 定稿占位符（含与设置页 AGENTS.md 的优先级关系）；
       // 状态灰字只留错误反馈，成功与继承态说明全删（占位符已承载语义）。
-      agentsArea.placeholder =
+      // Phase 8.5（FR-17 扩展）：关隔离 = 配置单源全局模板，实例 AGENTS 覆盖
+      // 不参与（effective_config 既有语义）——局部输入框禁用、缘由进占位符，
+      // 重开隔离自动恢复（随隔离开关实时同步，见 syncIso）。
+      const AGENTS_PLACEHOLDER =
         "该版本的全局系统指令，优先级大于设置页AGENTS.md，只生效一个";
+      const syncAgentsDisabled = (): void => {
+        const off = !inst.isolation;
+        agentsArea.disabled = off;
+        agentsArea.placeholder = off
+          ? "关闭隔离时不可用——配置单源全局模板"
+          : AGENTS_PLACEHOLDER;
+      };
+      syncAgentsDisabled();
       const agentsStatus = el("p", { class: "settings-path" }, [""]);
       let agentsLoaded = false;
       agentsArea.addEventListener("input", () => {
@@ -372,11 +383,13 @@ export const instanceSettingsPage: PageDefinition = {
         isoBtn.textContent = armed ? "确认切换？" : inst.isolation ? "关闭隔离" : "开启隔离";
         isoStatus.textContent = armed
           ? inst.isolation
-            ? "关闭后：插件目录并入共享区（与其他关闭隔离的实例共用，同名内容改名留档）；配置改由全局模板单源；会话与工作区仍独立。运行中的实例需先停止。"
+            ? "关闭后：插件目录并入共享区（与其他关闭隔离的实例共用，同名内容改名留档）；配置改由全局模板单源，局部 AGENTS 输入框停用；会话与工作区仍独立——网页左侧栏会话记录每次为空、插件加载报错属正常现象。运行中的实例需先停止。"
             : "开启后：从共享池复制一份插件到本实例（共享池保留）；配置恢复「全局默认 ⊕ 本实例覆盖」。"
           : inst.isolation
             ? "当前：隔离——插件与配置独立于其他实例。"
-            : "当前：共享——插件目录联接至共享池，配置单源全局模板（实例覆盖暂不参与）。";
+            : "当前：共享——插件目录联接至共享池，配置单源全局模板（实例覆盖暂不参与，局部 AGENTS 输入框停用）。";
+        // Phase 8.5：共享态下局部 AGENTS 输入框停用，随隔离切换实时同步。
+        syncAgentsDisabled();
       };
       syncIso();
       isoBtn.addEventListener("click", () => {

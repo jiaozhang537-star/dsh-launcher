@@ -75,7 +75,7 @@ pub fn background_random() -> Result<Option<PersonalizeImage>, String> {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(None);
     };
-    let mut images: Vec<PathBuf> = entries
+    let images: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && is_image(p))

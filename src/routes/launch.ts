@@ -4,6 +4,7 @@ import { icon } from "../lib/icons";
 import { enterMsg } from "../lib/anim";
 import { showHint } from "../lib/hint";
 import { webEntryUrl } from "../lib/launch-decision";
+import { applyVisibilityOnLaunch } from "../lib/visibility";
 import { sortInstancesForLaunch } from "../lib/instanceOrder";
 import { settledStageText, stepLevelOf, type StepLevel } from "../lib/launchSteps";
 import { getSelectedInstance, setSelectedInstance } from "../lib/selected-instance";
@@ -958,6 +959,9 @@ let followPendingVendor: string | null = null;
         const target = webEntryUrl({ webUrl: url ?? null, port });
         if (target === null) return;
         void openInstanceWeb(target);
+        // 启动器可见性（FR-28）：网页就绪即「游戏启动」，按设置施加窗口动作
+        // （PCL McLaunchEnd 同触发点；保持不变 = 无操作）。
+        void applyVisibilityOnLaunch();
         progressTarget = 100;
         stageText = "DSH 网页已就绪";
         settleLaunchStep("ok", "DSH 网页已就绪，已打开浏览器");

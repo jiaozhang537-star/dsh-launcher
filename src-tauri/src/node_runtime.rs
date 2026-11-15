@@ -71,6 +71,28 @@ pub struct LauncherConfig {
     /// 自更新源（FR-13，`owner/repo`）；None/空 = 未配置（检查更新如实报告）。
     #[serde(default)]
     pub update_repo: Option<String>,
+    /// 默认版本隔离（Phase 8.5，FR-17 扩展；PCL LaunchArgumentIndieV2 同语义）：
+    /// 新装实例的隔离默认；None = 完全隔离（true）。**仅作用于新建实例**——
+    /// 已有实例各走版本设置页的隔离开关，不受本项影响。
+    #[serde(default)]
+    pub default_isolation: Option<bool>,
+    /// 启动器可见性（Phase 8.5，FR-28；PCL LaunchArgumentVisible 原值系，1 弃用）：
+    /// 0 = 网页就绪后立即关闭；2 = 隐藏，最后实例退出后自动关闭；
+    /// 3 = 隐藏，最后实例退出后重新打开；4 = 最小化；5/None = 保持不变。
+    #[serde(default)]
+    pub launcher_visibility: Option<u8>,
+}
+
+impl LauncherConfig {
+    /// 新装实例的隔离默认（None 回落完全隔离——安全默认，配置损坏不扩大共享面）。
+    pub fn effective_default_isolation(&self) -> bool {
+        self.default_isolation.unwrap_or(true)
+    }
+
+    /// 启动器可见性档位（None 回落保持不变 = PCL 出厂默认）。
+    pub fn effective_launcher_visibility(&self) -> u8 {
+        self.launcher_visibility.unwrap_or(5)
+    }
 }
 
 /// 解析 `vX.Y.Z` 形式的版本输出为 (major, minor, patch)。
@@ -712,6 +734,26 @@ mod tests {
     /// 复用 instances 测试模块的跨模块互斥沙箱：所有测试共享进程级 LOCALAPPDATA。
     fn sandbox(tag: &str) -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
         super::super::instances::tests::sandbox(&format!("node-{tag}"))
+    }
+
+    /// Phase 8.5：启动选项两字段（默认隔离 / 启动器可见性）serde 回环 + None
+    /// 回落语义（完全隔离 / 保持不变 = PCL 出厂默认）。
+    #[test]
+    fn launcher_config_launch_options_roundtrip_and_fallback() {
+        let (_lock, tmp) = sandbox("launch-options");
+        let cfg = load_config().unwrap();
+        assert!(cfg.effective_default_isolation(), "未配置回落完全隔离");
+        assert_eq!(cfg.effective_launcher_visibility(), 5, "未配置回落保持不变");
+        save_config(&LauncherConfig {
+            default_isolation: Some(false),
+            launcher_visibility: Some(2),
+            ..LauncherConfig::default()
+        })
+        .unwrap();
+        let cfg = load_config().unwrap();
+        assert!(!cfg.effective_default_isolation());
+        assert_eq!(cfg.effective_launcher_visibility(), 2);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// 启动链的运行环境门槛：托管默认必须真的有个 node.exe 才算数；系统 Node 不
