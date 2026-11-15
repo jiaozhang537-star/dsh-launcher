@@ -1,4 +1,10 @@
+<div align="center">
+
+<img src="src-tauri/icons/icon.png" width="128" alt="DSH 启动器 logo"/>
+
 # DSH 启动器
+
+</div>
 
 DeepSeek Harness（DSH）的图形化启动器：**像 PCL 管理 Minecraft 一样管理你的 DSH**——多实例下载与全套隔离、插件市场、Skill 中心、整合包分享、运行环境（Node）托管、模型厂商配置。
 
