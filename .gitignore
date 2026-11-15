@@ -60,3 +60,11 @@ docs/plans/assets
 
 # ZCode 工具生成的搜索排除配置（非项目文件）
 .zcodeignore
+
+# Windows 系统文件
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# 密钥兜底（一律不入库）
+.env*
