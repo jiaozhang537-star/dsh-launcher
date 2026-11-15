@@ -8,7 +8,7 @@ DeepSeek Harness（DSH）的图形化启动器：**像 PCL 管理 Minecraft 一�
 
 **系统要求**：Windows 10（1809+）或 Windows 11，64 位；WebView2 运行库缺失时安装包会自动引导安装（无需手动下载）。
 
-1. 到 [GitHub Releases](https://github.com/imccyu/dsh-launcher/releases) 下载 `dsh-launcher_0.1.0_x64-setup.exe`；
+1. 到 [GitHub Releases](https://github.com/jiaozhang537-star/dsh-launcher/releases) 下载 `dsh-launcher_0.1.0_x64-setup.exe`；
 2. 双击运行。首次运行若出现「**Windows 已保护你的电脑**」（SmartScreen），点 **更多信息 → 仍要运行**——安装包未做代码签名，这是预期提示；
 3. 按向导完成安装（当前用户安装，**不需要管理员权限**），开始菜单出现「DSH 启动器」。
 

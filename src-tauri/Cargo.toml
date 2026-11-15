@@ -2,7 +2,7 @@
 name = "dsh-launcher"
 version = "0.1.0"
 description = "DeepSeek Harness 图形化启动器"
-authors = ["imccyu"]
+authors = ["jiaozhang537-star"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

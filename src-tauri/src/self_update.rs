@@ -1,7 +1,8 @@
 //! 启动器自更新（FR-13）：经 GitHub Releases 检查新版并获取安装包。
 //!
 //! 无服务端红线：GitHub 公开接口。更新源 = config.json 的 `update_repo`
-//! 显式配置优先，未配置回落内置默认 `imccyu/dsh-launcher`（P7 W1；仓库尚无
+//! 显式配置优先，未配置回落内置默认 `jiaozhang537-star/dsh-launcher`（P7 W1
+//! 内置 `imccyu/dsh-launcher`，2026-11-15 随实际建仓归属改定；仓库尚无
 //! Release 时如实报 404 可读文案）。安装包 = Release 资产中首个 `.exe`（缺失
 //! 回落 `.msi`）；下载进统一任务队列（任务键 `update`，支持暂停 / 继续 / 取消
 //! 与断点续传）。启动器只负责「下载 + 打开安装包」，安装流程交给系统安装器。
@@ -71,7 +72,7 @@ const CHECKSUM_ASSET: &str = "SHA256SUMS.txt";
 /// 内置默认更新源（P7 W1）：config.json 的 `update_repo` 未配置时回落——
 /// 用户无需手工配置即可获得检查更新能力；仓库还没有 Release 时如实报
 /// 「404 通常 = 更新源还没有任何正式发布」。config.json 显式配置恒优先。
-const DEFAULT_UPDATE_REPO: &str = "imccyu/dsh-launcher";
+const DEFAULT_UPDATE_REPO: &str = "jiaozhang537-star/dsh-launcher";
 
 /// 生效更新源：config.json 显式配置优先，缺省回落 [`DEFAULT_UPDATE_REPO`]。
 pub(crate) fn effective_update_repo() -> Option<String> {

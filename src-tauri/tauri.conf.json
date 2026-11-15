@@ -35,7 +35,7 @@
     "active": true,
     "targets": ["nsis"],
     "category": "DeveloperTool",
-    "publisher": "imccyu",
+    "publisher": "jiaozhang537-star",
     "shortDescription": "DeepSeek Harness（DSH）的图形化启动器",
     "longDescription": "DSH 启动器是 DeepSeek Harness 的图形化外壳：网页端之外的下载、实例隔离、模型厂商、插件市场、技能中心与整合包搬运，全程图形界面，不修改 DSH 本体。",
     "icon": [
