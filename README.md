@@ -92,18 +92,7 @@ src-tauri/src/       后端（Rust）
   skills.rs         Skill 安装
   modpack.rs        整合包导出与导入
 src-tauri/windows/   NSIS 安装器钩子（卸载数据警示卡）
-docs/                项目文档（见下）
 ```
-
-## 文档
-
-| 文件 | 回答什么 |
-| --- | --- |
-| [docs/PROJECT.md](docs/PROJECT.md) | 这个项目到底是什么：定位、硬性原则、需求边界、架构取向、完成标准 |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | 走到哪了：阶段划分与当前阶段 |
-| [docs/plans/](docs/plans/) | 当前阶段的详细计划与「进度与决策日志」（会话中断后从这里接续） |
-| [docs/reviews/](docs/reviews/) | 对抗式审查与 QA 报告 |
-| [AGENTS.md](AGENTS.md) | 本仓的开工前必读与红线纪律 |
 
 ## 变更记录
 

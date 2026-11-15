@@ -68,3 +68,7 @@ $RECYCLE.BIN/
 
 # 密钥兜底（一律不入库）
 .env*
+
+# 过程文档与 Agent 工作文件（仅本地保留，开源的是项目不是过程）
+AGENTS.md
+docs/

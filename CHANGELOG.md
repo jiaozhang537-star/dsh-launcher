@@ -1,6 +1,6 @@
 # 变更记录
 
-本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)；发布节奏见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [0.1.0] - 2026-10-06（内测预发布）
 
